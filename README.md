@@ -22,12 +22,14 @@ This project implements a deterministic, budget-aware root-cause analysis (RCA) 
 - Generic `(service, failure_mode)` hypothesis generation and lexicographic ranking.
 - Deterministic pair-separation query planning using configured query costs.
 - An autonomous diagnosis loop with explicit exhaustive and topology-prioritized bootstrap policies plus resolved, ambiguous, incomplete-budget, and no-candidate outcomes.
+- A simulator-independent safety-gated remediation planner with six declarative failure-mode policies and immutable execution contracts.
+- Stateful simulator continuation and a simulator remediation executor that changes only future fault effects without resetting queues, prior states, or RNG state.
 
-Remediation execution, recovery verification, final benchmark reporting, UI, and OpenTelemetry adapters are not implemented yet.
+Recovery verification, diagnose-act-verify retries, final benchmark reporting, UI, and OpenTelemetry adapters are not implemented yet.
 
 ## Architecture
 
-`src/core` contains generic telemetry and access primitives. `src/simulation` owns topology, fault injection, synthetic state, telemetry imperfections, and hidden truth. `src/rca` consumes only queried canonical events and historical baseline context to detect candidates, evaluate causal hypotheses, rank them without a weighted score, and select additional queries under one global budget. Ground truth remains an evaluation-only sibling object.
+`src/core` contains generic telemetry and access primitives. `src/simulation` owns topology, fault injection, synthetic state, telemetry imperfections, hidden truth, and the simulator-specific remediation executor. `src/rca` consumes only queried canonical events and historical baseline context to detect candidates, evaluate causal hypotheses, rank them without a weighted score, and select additional queries under one global budget. `src/remediation` contains simulator-independent action, planning, and execution contracts. Ground truth remains an evaluation-only sibling object.
 
 ## Setup and run
 
@@ -45,6 +47,7 @@ pytest
 ```text
 src/core/          canonical models, normalization, baselines, budget, query API
 src/rca/           observability, signatures, causal diagnosis, planner, agent
+src/remediation/   safe action planning and generic execution contracts
 src/simulation/    benchmark configuration, faults, simulator, incident generator
 tests/             focused foundation and observability tests
 main.py            deterministic budget-aware diagnosis demonstration

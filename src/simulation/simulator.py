@@ -33,6 +33,15 @@ class SimulationOutput:
     state_history: tuple[dict[str, ServiceState], ...]
 
 
+@dataclass(slots=True)
+class _FaultScenario:
+    root_service: str
+    failure_mode: str
+    parameters: dict[str, float]
+    fault_start_step: int
+    mitigated: bool = False
+
+
 class MicroserviceSimulator:
     def __init__(self, config: SimulationConfig, seed: int) -> None:
         self.config = config
@@ -44,6 +53,18 @@ class MicroserviceSimulator:
             name: ServiceState(0, 0, service.capacity_rps, 0, service.base_latency_ms, 0, service.base_memory_utilization, 0, True)
             for name, service in self._service_map.items()
         }
+        self._start_time: datetime | None = None
+        self._next_step = 0
+        self._last_step_time: datetime | None = None
+        self._fault_scenario: _FaultScenario | None = None
+
+    @property
+    def services(self) -> frozenset[str]:
+        return frozenset(self._service_map)
+
+    @property
+    def last_step_time(self) -> datetime | None:
+        return self._last_step_time
 
     def run(
         self,
@@ -53,31 +74,98 @@ class MicroserviceSimulator:
         failure_mode: str,
         fault_parameters: dict[str, float],
     ) -> SimulationOutput:
+        self.start_run(
+            start_time,
+            fault_start_step,
+            root_service,
+            failure_mode,
+            fault_parameters,
+        )
+        return self.continue_run(
+            self.config.baseline_steps + self.config.incident_steps
+        )
+
+    def start_run(
+        self,
+        start_time: datetime,
+        fault_start_step: int,
+        root_service: str,
+        failure_mode: str,
+        fault_parameters: dict[str, float],
+    ) -> None:
+        if self._start_time is not None:
+            raise RuntimeError("simulation run has already started")
+        if fault_start_step < 0:
+            raise ValueError("fault_start_step cannot be negative")
+        self._start_time = start_time
+        self._fault_scenario = _FaultScenario(
+            root_service,
+            failure_mode,
+            dict(fault_parameters),
+            fault_start_step,
+        )
+
+    def continue_run(self, step_count: int) -> SimulationOutput:
+        if self._start_time is None or self._fault_scenario is None:
+            raise RuntimeError("start_run must be called before continuing simulation")
+        if step_count < 0:
+            raise ValueError("step_count cannot be negative")
+
         metrics: list[MetricEvent] = []
         logs: list[LogEvent] = []
         spans: list[SpanEvent] = []
         history: list[dict[str, ServiceState]] = []
-        total_steps = self.config.baseline_steps + self.config.incident_steps
 
-        for step in range(total_steps):
-            true_time = start_time + timedelta(seconds=step * self.config.step_seconds)
-            fault_active = step >= fault_start_step
-            states = self._simulate_step(root_service, failure_mode, fault_parameters, fault_active)
+        for _ in range(step_count):
+            step = self._next_step
+            true_time = self._start_time + timedelta(
+                seconds=step * self.config.step_seconds
+            )
+            fault_active = self._fault_is_active(step)
+            states = self._simulate_step(fault_active)
             history.append(states)
             metrics.extend(self._metric_events(true_time, states))
-            logs.extend(self._log_events(true_time, states, root_service, failure_mode, step, fault_start_step))
+            logs.extend(
+                self._log_events(
+                    true_time,
+                    states,
+                    self._fault_scenario.root_service,
+                    self._fault_scenario.failure_mode,
+                    step,
+                    fault_active
+                    and step == self._fault_scenario.fault_start_step,
+                )
+            )
             spans.extend(self._trace_events(true_time, states, step))
             self._previous_states = states
+            self._last_step_time = true_time
+            self._next_step += 1
 
         return SimulationOutput(tuple(metrics), tuple(logs), tuple(spans), tuple(history))
 
+    def mitigate_fault(self, target_service: str, failure_mode: str) -> None:
+        """Clear a matching active fault without exposing whether it matched."""
+        scenario = self._fault_scenario
+        if (
+            scenario is not None
+            and scenario.root_service == target_service
+            and scenario.failure_mode == failure_mode
+        ):
+            scenario.mitigated = True
+
+    def _fault_is_active(self, step: int) -> bool:
+        scenario = self._fault_scenario
+        return (
+            scenario is not None
+            and not scenario.mitigated
+            and step >= scenario.fault_start_step
+        )
+
     def _simulate_step(
         self,
-        root_service: str,
-        failure_mode: str,
-        parameters: dict[str, float],
         fault_active: bool,
     ) -> dict[str, ServiceState]:
+        assert self._fault_scenario is not None
         arrivals = {name: 0.0 for name in self._order}
         for service in self._service_map.values():
             if service.external_request_rate:
@@ -94,8 +182,11 @@ class MicroserviceSimulator:
         for name in self._order:
             service = self._service_map[name]
             effects = (
-                effects_for(failure_mode, parameters)
-                if fault_active and name == root_service
+                effects_for(
+                    self._fault_scenario.failure_mode,
+                    self._fault_scenario.parameters,
+                )
+                if fault_active and name == self._fault_scenario.root_service
                 else FaultEffects()
             )
             capacity = service.capacity_rps * effects.capacity_factor
@@ -183,12 +274,12 @@ class MicroserviceSimulator:
         root_service: str,
         failure_mode: str,
         step: int,
-        fault_start_step: int,
+        emit_fault_log: bool,
     ) -> list[LogEvent]:
         messages: list[LogEvent] = []
         normal_variants = ("request batch completed", "health check passed", "worker cycle completed")
         for index, (service, state) in enumerate(states.items()):
-            if step == fault_start_step and service == root_service:
+            if emit_fault_log and service == root_service:
                 messages.append(
                     LogEvent(true_time, true_time, service, "ERROR", describe_fault(failure_mode))
                 )

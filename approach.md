@@ -35,6 +35,10 @@ The diagnosis layer declares generic metric, log, and trace expectations for all
 
 The active planner compares the expected observations of surviving hypotheses before querying. It selects the affordable uncached metric, log, or trace query with the greatest pair separation per configured cost. The autonomous agent exposes its initial observation policy explicitly: the default exhaustive metric bootstrap is retained when affordable, while a topology-prioritized metric subset gathers deterministic partial evidence under smaller budgets and returns `INCOMPLETE_BUDGET`. After bootstrap, evaluation and targeted querying continue until the agent resolves a unique supported hypothesis, exhausts useful queries or budget, or finds no candidates.
 
+The remediation layer is separate from RCA and simulation. A declarative policy maps each supported failure mode to one operational action. The safety planner emits an immutable single-service action only for a resolved, strong, contradiction-free hypothesis with direct root log or trace confirmation and a known target; every other outcome is explicitly blocked. A generic executor protocol reports whether a command was applied, rejected, or failed without claiming recovery.
+
+The simulator implements that executor behind the generic boundary. Its original `run()` method and incremental continuation share one state-update path, preserving queues, prior service states, deterministic RNG state, and step numbering. A compatible action on the actual target clears the corresponding effect only for future steps. Wrong targets and incompatible actions can still be applied as commands but leave the hidden fault active, allowing later recovery verification to observe failure without exposing ground truth.
+
 ## Isolation decisions
 
 Synthetic simulation is a benchmark backend, not the RCA algorithm. Simulator topology, internal state, true timing, fault injection, and service-specific validity rules live under `src/simulation`; the generic `src/core` layer can accept future OpenTelemetry-derived events without importing simulation code.
@@ -45,4 +49,4 @@ Budgeting represents the operational cost and latency of fetching evidence in re
 
 ## Planned, not implemented
 
-Later stages will add remediation safeguards and execution, recovery verification, OpenTelemetry ingestion, a user interface, and final benchmark reporting.
+Later stages will add recovery verification and diagnose-act-verify retry control, OpenTelemetry ingestion, a user interface, and final benchmark reporting.
