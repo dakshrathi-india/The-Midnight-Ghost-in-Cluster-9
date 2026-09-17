@@ -158,6 +158,6 @@ def benchmark_config(fragmentation: FragmentationConfig | None = None) -> Simula
         ServiceConfig("inventory", 125, 10, dependencies=("catalog",), valid_failure_modes=general_modes),
         ServiceConfig("catalog", 135, 9, valid_failure_modes=general_modes),
         ServiceConfig("redis", 170, 3, valid_failure_modes=datastore_modes),
-        ServiceConfig("postgres", 210, 6, valid_failure_modes=datastore_modes),
+        ServiceConfig("postgres", 260, 6, valid_failure_modes=datastore_modes),
     )
     return SimulationConfig(services=services, fragmentation=fragmentation or FragmentationConfig())

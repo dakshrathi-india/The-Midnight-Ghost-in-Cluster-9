@@ -1,6 +1,6 @@
 # Budget-Aware Root-Cause Analysis Foundation
 
-This project is the foundation of an autonomous root-cause analysis (RCA) system for cascading failures in distributed microservices. The intended system will reason over fragmented metrics, logs, and traces while spending a limited telemetry-query budget. This repository currently implements the data and simulation foundation only; it does not yet diagnose incidents.
+This project is the foundation of an autonomous root-cause analysis (RCA) system for cascading failures in distributed microservices. It currently turns fragmented, budgeted telemetry into independently inspectable observability evidence and service-level anomaly candidates. It does not yet select a causal root cause.
 
 ## What is implemented
 
@@ -9,15 +9,19 @@ This project is the foundation of an autonomous root-cause analysis (RCA) system
 - A configuration-driven, discrete-time microservice simulator with queueing, capacity, retries, dependency propagation, and bounded noise.
 - Six behavioural fault families: CPU saturation, deployment regression, database slowdown, connection exhaustion, network latency, and process crash.
 - Reproducible metrics, logs, and parent/child traces with configurable clock skew, missing or delayed observations, metric noise, and decoy anomalies.
-- Historical metric summaries and optional cached dependency edges in a separate `BaselineStore`.
+- Historical robust metric summaries, immutable healthy metric history, and optional cached dependency edges in a separate `BaselineStore`.
 - Evaluation-only ground truth kept outside diagnosis-facing telemetry.
 - A controlled `TelemetryQueryAPI` with one global budget, configurable per-query costs, exact-query caching, and query history.
+- Generic service dependency reconstruction and per-service failure/latency evidence from parent-child spans.
+- Independent MAD, CUSUM, and unsupervised multivariate Isolation Forest anomaly signals with raw evidence.
+- Deterministic structured and TF-IDF semantic log evidence.
+- Exact detector-count candidate generation with trace/log corroboration promotion.
 
-Anomaly detection, graph reconstruction, hypothesis generation, diagnosis, query planning, remediation, UI, and OpenTelemetry adapters are deliberately not implemented at this stage.
+Failure signatures, `(service, failure_mode)` hypotheses, causal ranking, active query planning, remediation, recovery verification, UI, and OpenTelemetry adapters are not implemented yet.
 
 ## Architecture
 
-`src/core` contains generic telemetry and access primitives and knows nothing about benchmark service names or simulator fault internals. `src/simulation` owns topology, fault injection, synthetic state, telemetry imperfections, and hidden truth. An incident returns canonical telemetry and historical baseline context for future RCA code, while ground truth remains an evaluation-only sibling object.
+`src/core` contains generic telemetry and access primitives. `src/simulation` owns topology, fault injection, synthetic state, telemetry imperfections, and hidden truth. `src/rca` consumes only queried canonical events and historical baseline context to reconstruct trace topology, calculate three separate anomaly signals, interpret log evidence, and apply the frozen candidate rule. Ground truth remains an evaluation-only sibling object.
 
 ## Setup and run
 
@@ -34,8 +38,9 @@ pytest
 
 ```text
 src/core/          canonical models, normalization, baselines, budget, query API
+src/rca/           trace graph, anomaly signals, log evidence, candidates
 src/simulation/    benchmark configuration, faults, simulator, incident generator
-tests/             focused foundation tests
-main.py            deterministic demonstration
+tests/             focused foundation and observability tests
+main.py            deterministic foundation and observability demonstration
 approach.md        implemented boundaries and planned RCA pipeline
 ```

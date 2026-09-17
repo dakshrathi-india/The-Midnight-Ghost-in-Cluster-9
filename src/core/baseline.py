@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from statistics import fmean, pstdev
+from statistics import fmean, median, pstdev
 from types import MappingProxyType
 from typing import Mapping
 
@@ -17,6 +18,18 @@ class MetricSummary:
     standard_deviation: float
     minimum: float
     maximum: float
+    median: float = math.nan
+    median_absolute_deviation: float = math.nan
+
+    def __post_init__(self) -> None:
+        if math.isnan(self.median):
+            object.__setattr__(self, "median", self.mean)
+        if math.isnan(self.median_absolute_deviation):
+            object.__setattr__(
+                self,
+                "median_absolute_deviation",
+                self.standard_deviation * 0.67448975,
+            )
 
 
 class BaselineStore:
@@ -27,6 +40,7 @@ class BaselineStore:
         typical_service_latencies_ms: Mapping[str, float],
         cached_dependency_edges: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
         historical_context_counts_toward_budget: bool = False,
+        metric_history: tuple[MetricEvent, ...] | list[MetricEvent] = (),
     ) -> None:
         self.known_services = frozenset(known_services)
         self.metric_summaries = MappingProxyType(dict(metric_summaries))
@@ -35,6 +49,9 @@ class BaselineStore:
         )
         self.cached_dependency_edges = frozenset(cached_dependency_edges or ())
         self.historical_context_counts_toward_budget = historical_context_counts_toward_budget
+        self.metric_history = tuple(
+            sorted(metric_history, key=lambda event: (event.event_timestamp, event.service, event.metric_name))
+        )
 
     @classmethod
     def from_metrics(
@@ -47,16 +64,20 @@ class BaselineStore:
         grouped: dict[tuple[str, str], list[float]] = {}
         for event in metrics:
             grouped.setdefault((event.service, event.metric_name), []).append(event.value)
-        summaries = {
-            key: MetricSummary(
+        summaries: dict[tuple[str, str], MetricSummary] = {}
+        for key, values in grouped.items():
+            baseline_median = median(values)
+            summaries[key] = MetricSummary(
                 count=len(values),
                 mean=fmean(values),
                 standard_deviation=pstdev(values),
                 minimum=min(values),
                 maximum=max(values),
+                median=baseline_median,
+                median_absolute_deviation=median(
+                    abs(value - baseline_median) for value in values
+                ),
             )
-            for key, values in grouped.items()
-        }
         latencies = {
             service: summaries[(service, "request_latency_ms")].mean
             for service in known_services
@@ -68,4 +89,5 @@ class BaselineStore:
             latencies,
             cached_dependency_edges,
             historical_context_counts_toward_budget,
+            metrics,
         )
