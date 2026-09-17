@@ -39,7 +39,6 @@ class BaselineStore:
         metric_summaries: Mapping[tuple[str, str], MetricSummary],
         typical_service_latencies_ms: Mapping[str, float],
         cached_dependency_edges: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
-        historical_context_counts_toward_budget: bool = False,
         metric_history: tuple[MetricEvent, ...] | list[MetricEvent] = (),
     ) -> None:
         self.known_services = frozenset(known_services)
@@ -48,7 +47,6 @@ class BaselineStore:
             dict(typical_service_latencies_ms)
         )
         self.cached_dependency_edges = frozenset(cached_dependency_edges or ())
-        self.historical_context_counts_toward_budget = historical_context_counts_toward_budget
         self.metric_history = tuple(
             sorted(metric_history, key=lambda event: (event.event_timestamp, event.service, event.metric_name))
         )
@@ -59,7 +57,6 @@ class BaselineStore:
         known_services: set[str],
         metrics: list[MetricEvent] | tuple[MetricEvent, ...],
         cached_dependency_edges: set[tuple[str, str]] | None = None,
-        historical_context_counts_toward_budget: bool = False,
     ) -> "BaselineStore":
         grouped: dict[tuple[str, str], list[float]] = {}
         for event in metrics:
@@ -88,6 +85,5 @@ class BaselineStore:
             summaries,
             latencies,
             cached_dependency_edges,
-            historical_context_counts_toward_budget,
             metrics,
         )

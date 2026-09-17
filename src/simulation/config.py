@@ -81,7 +81,6 @@ class SimulationConfig:
     traces_per_root_per_step: int = 1
     retry_factor: float = 0.7
     fragmentation: FragmentationConfig = field(default_factory=FragmentationConfig)
-    historical_context_counts_toward_budget: bool = False
 
     def __post_init__(self) -> None:
         if not self.services:

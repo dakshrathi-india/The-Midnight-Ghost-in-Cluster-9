@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
 import pytest
 
 from src.core import BaselineStore, LogEvent, MetricEvent, SpanEvent, TelemetryQueryAPI
@@ -19,7 +21,12 @@ from src.rca.anomaly import (
 )
 from src.rca.candidates import CandidateGenerator, CandidateStrength, ServiceCandidate
 from src.rca.graph import TraceGraphAnalyzer, TraceServiceEvidence
-from src.rca.logs import LogEvidence, LogEvidenceExtractor
+from src.rca.logs import (
+    LogEvidence,
+    LogEvidenceConfig,
+    LogEvidenceExtractor,
+    SentenceTransformerEmbedder,
+)
 from src.simulation import (
     FaultRequest,
     FragmentationConfig,
@@ -248,8 +255,8 @@ def test_isolation_forest_detects_multivariate_anomaly_deterministically() -> No
     for index in range(30):
         baseline_events.extend(
             (
-                _metric(index, "api", "cpu", 0.30 + (index % 3) * 0.01),
-                _metric(index, "api", "latency", 20 + (index % 4), "ms"),
+                _metric(index, "api", "cpu_utilization", 0.30 + (index % 3) * 0.01),
+                _metric(index, "api", "request_latency_ms", 20 + (index % 4), "ms"),
             )
         )
     baseline = _baseline(baseline_events)
@@ -257,8 +264,8 @@ def test_isolation_forest_detects_multivariate_anomaly_deterministically() -> No
     for index in range(8):
         incident.extend(
             (
-                _metric(100 + index, "api", "cpu", 0.95),
-                _metric(100 + index, "api", "latency", 250, "ms"),
+                _metric(100 + index, "api", "cpu_utilization", 0.95),
+                _metric(100 + index, "api", "request_latency_ms", 250, "ms"),
             )
         )
     config = IsolationForestConfig(random_state=23, minimum_anomalous_fraction=0.1)
@@ -268,7 +275,7 @@ def test_isolation_forest_detects_multivariate_anomaly_deterministically() -> No
 
     assert first == second
     assert first.flagged
-    assert first.feature_names == ("cpu", "latency")
+    assert first.feature_names == ("cpu_utilization", "request_latency_ms")
     assert first.training_sample_count == 30
     assert first.incident_sample_count == 8
     assert first.anomalous_count > 0
@@ -279,22 +286,26 @@ def test_isolation_forest_detects_multivariate_anomaly_deterministically() -> No
 def test_isolation_forest_fits_only_baseline_and_handles_incomplete_vectors() -> None:
     baseline_events: list[MetricEvent] = []
     for index in range(12):
-        baseline_events.append(_metric(index, "svc", "cpu", 0.2 + index * 0.001))
+        baseline_events.append(
+            _metric(index, "svc", "cpu_utilization", 0.2 + index * 0.001)
+        )
         if index % 2 == 0:
-            baseline_events.append(_metric(index, "svc", "latency", 10 + index, "ms"))
+            baseline_events.append(
+                _metric(index, "svc", "request_latency_ms", 10 + index, "ms")
+            )
     baseline = _baseline(baseline_events)
     incident = [
-        _metric(30, "svc", "cpu", 0.9),
-        _metric(31, "svc", "latency", 100, "ms"),
-        _metric(32, "svc", "cpu", 0.95),
-        _metric(32, "svc", "latency", 120, "ms"),
+        _metric(30, "svc", "cpu_utilization", 0.9),
+        _metric(31, "svc", "request_latency_ms", 100, "ms"),
+        _metric(32, "svc", "cpu_utilization", 0.95),
+        _metric(32, "svc", "request_latency_ms", 120, "ms"),
     ]
 
     result = IsolationForestDetector().analyze("svc", incident, baseline)
 
     assert result.training_sample_count == 12
     assert result.incident_sample_count == 3
-    assert result.feature_names == ("cpu", "latency")
+    assert result.feature_names == ("cpu_utilization", "request_latency_ms")
 
 
 def test_isolation_forest_does_not_flag_service_for_small_anomalous_fraction() -> None:
@@ -303,18 +314,18 @@ def test_isolation_forest_does_not_flag_service_for_small_anomalous_fraction() -
     for index in range(20):
         baseline_events.extend(
             (
-                _metric(index, "api", "cpu", 0.3 + (index % 3) * 0.01),
-                _metric(index, "api", "latency", 20 + (index % 4), "ms"),
+                _metric(index, "api", "cpu_utilization", 0.3 + (index % 3) * 0.01),
+                _metric(index, "api", "request_latency_ms", 20 + (index % 4), "ms"),
             )
         )
         incident.extend(
             (
-                _metric(100 + index, "api", "cpu", 0.3 + (index % 3) * 0.01),
-                _metric(100 + index, "api", "latency", 20 + (index % 4), "ms"),
+                _metric(100 + index, "api", "cpu_utilization", 0.3 + (index % 3) * 0.01),
+                _metric(100 + index, "api", "request_latency_ms", 20 + (index % 4), "ms"),
             )
         )
-    incident[-2] = _metric(119, "api", "cpu", 0.99)
-    incident[-1] = _metric(119, "api", "latency", 500, "ms")
+    incident[-2] = _metric(119, "api", "cpu_utilization", 0.99)
+    incident[-1] = _metric(119, "api", "request_latency_ms", 500, "ms")
 
     result = IsolationForestDetector().analyze(
         "api", incident, _baseline(baseline_events)
@@ -322,6 +333,80 @@ def test_isolation_forest_does_not_flag_service_for_small_anomalous_fraction() -
 
     assert result.anomalous_fraction < 0.5
     assert not result.flagged
+
+
+def test_isolation_forest_ignores_unapproved_metrics() -> None:
+    baseline_events = [
+        event
+        for index in range(8)
+        for event in (
+            _metric(index, "svc", "cpu_utilization", 0.3),
+            _metric(index, "svc", "vendor_magic_score", 10 + index),
+        )
+    ]
+    incident = [
+        event
+        for index in range(5)
+        for event in (
+            _metric(20 + index, "svc", "cpu_utilization", 0.8),
+            _metric(20 + index, "svc", "vendor_magic_score", 1000),
+        )
+    ]
+
+    result = IsolationForestDetector().analyze(
+        "svc", incident, _baseline(baseline_events)
+    )
+
+    assert result.feature_names == ("cpu_utilization",)
+
+
+def test_isolation_forest_optional_queue_feature_can_be_enabled() -> None:
+    baseline_events = [
+        event
+        for index in range(8)
+        for event in (
+            _metric(index, "svc", "cpu_utilization", 0.3),
+            _metric(index, "svc", "queue_length", index, "requests"),
+        )
+    ]
+    incident = [
+        event
+        for index in range(5)
+        for event in (
+            _metric(20 + index, "svc", "cpu_utilization", 0.8),
+            _metric(20 + index, "svc", "queue_length", 100, "requests"),
+        )
+    ]
+    detector = IsolationForestDetector(
+        IsolationForestConfig(optional_features=("queue_length",))
+    )
+
+    result = detector.analyze("svc", incident, _baseline(baseline_events))
+
+    assert result.feature_names == ("cpu_utilization", "queue_length")
+
+
+def test_isolation_forest_missing_optional_feature_is_safe() -> None:
+    baseline_events = [
+        event
+        for index in range(8)
+        for event in (
+            _metric(index, "svc", "cpu_utilization", 0.3),
+            _metric(index, "svc", "queue_length", index, "requests"),
+        )
+    ]
+    incident = [
+        _metric(20 + index, "svc", "cpu_utilization", 0.8)
+        for index in range(5)
+    ]
+    detector = IsolationForestDetector(
+        IsolationForestConfig(optional_features=("queue_length",))
+    )
+
+    result = detector.analyze("svc", incident, _baseline(baseline_events))
+
+    assert result.feature_names == ("cpu_utilization",)
+    assert result.incident_sample_count == 5
 
 
 def _mad_signal(service: str, flagged: bool) -> MADServiceEvidence:
@@ -352,6 +437,55 @@ def _log_signal(service: str) -> LogEvidence:
         0.8,
         True,
     )
+
+
+class _DeterministicTestEmbedder:
+    backend_name = "deterministic-test-embedder"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        self.calls += 1
+        vectors: list[list[float]] = []
+        concept_terms = (
+            {"processor", "compute", "cpu", "memory", "resources"},
+            {
+                "remote",
+                "network",
+                "communication",
+                "dependency",
+                "deadline",
+                "backend",
+                "far",
+            },
+            {"connection", "pool", "client", "sockets", "capacity", "slots", "occupied"},
+            {
+                "process",
+                "worker",
+                "crashed",
+                "stopped",
+                "terminated",
+                "health",
+                "unexpectedly",
+            },
+            {"release", "deployment", "code", "exceptions"},
+            {"database", "storage", "queries", "transactions", "data", "locks", "disk"},
+        )
+        for text in texts:
+            lowered = text.lower()
+            words = set(re.findall(r"[a-z]+", lowered))
+            vectors.append(
+                [float(len(words & terms)) for terms in concept_terms]
+            )
+        return np.asarray(vectors, dtype=float)
+
+
+class _UnavailableEmbedder:
+    backend_name = "unavailable-test-embedder"
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        raise OSError("embedding backend is unavailable")
 
 
 @pytest.mark.parametrize(
@@ -398,7 +532,10 @@ def test_semantic_log_evidence_is_structured_and_explainable() -> None:
         "trace-9",
     )
 
-    evidence = LogEvidenceExtractor().extract([event])[0]
+    evidence = LogEvidenceExtractor(
+        LogEvidenceConfig(semantic_similarity_threshold=0.8),
+        embedder=_DeterministicTestEmbedder(),
+    ).extract([event])[0]
 
     assert evidence.service == "custom-db"
     assert evidence.semantic_category == "database_slowdown"
@@ -406,6 +543,112 @@ def test_semantic_log_evidence_is_structured_and_explainable() -> None:
     assert evidence.high_severity_corroborating
     assert evidence.message == event.message
     assert evidence.trace_id == "trace-9"
+    assert evidence.matched_prototype is not None
+    assert evidence.semantic_backend == "deterministic-test-embedder"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_category"),
+    (
+        ("all client slots are occupied", "connection_exhaustion"),
+        ("backend call is taking far longer than normal", "timeout_network_delay"),
+        ("worker terminated unexpectedly", "process_unavailable"),
+    ),
+)
+def test_embedding_semantics_classify_unseen_paraphrases(
+    message: str, expected_category: str
+) -> None:
+    event = LogEvent(START, START, "worker", "ERROR", message)
+    extractor = LogEvidenceExtractor(
+        LogEvidenceConfig(semantic_similarity_threshold=0.8),
+        embedder=_DeterministicTestEmbedder(),
+    )
+
+    evidence = extractor.extract([event])[0]
+
+    assert evidence.semantic_category == expected_category
+    assert evidence.similarity_score >= 0.8
+
+
+def test_embedding_semantics_abstain_when_evidence_is_misleading() -> None:
+    event = LogEvent(
+        START,
+        START,
+        "worker",
+        "INFO",
+        "connection pool is not exhausted and routine checks are healthy",
+    )
+    extractor = LogEvidenceExtractor(
+        LogEvidenceConfig(semantic_similarity_threshold=0.8),
+        embedder=_DeterministicTestEmbedder(),
+    )
+
+    evidence = extractor.extract([event])[0]
+
+    assert evidence.semantic_category is None
+    assert not evidence.high_severity_corroborating
+
+
+def test_prototype_embeddings_are_cached_between_batches() -> None:
+    embedder = _DeterministicTestEmbedder()
+    extractor = LogEvidenceExtractor(
+        LogEvidenceConfig(semantic_similarity_threshold=0.8), embedder=embedder
+    )
+    event = LogEvent(START, START, "worker", "ERROR", "worker terminated unexpectedly")
+
+    extractor.extract([event])
+    extractor.extract([event])
+
+    assert embedder.calls == 3
+
+
+def test_sentence_transformer_backend_is_configurable_and_lazy() -> None:
+    embedder = SentenceTransformerEmbedder("organization/test-model")
+
+    assert embedder.backend_name == "sentence-transformers:organization/test-model"
+    assert not embedder.is_loaded
+
+
+def test_tfidf_fallback_is_reachable_when_embedding_backend_is_unavailable() -> None:
+    event = LogEvent(
+        START,
+        START,
+        "worker",
+        "ERROR",
+        "connection pool has no free capacity",
+    )
+    extractor = LogEvidenceExtractor(embedder=_UnavailableEmbedder())
+
+    evidence = extractor.extract([event])[0]
+
+    assert evidence.semantic_backend == "tfidf-fallback"
+    assert evidence.semantic_category == "connection_exhaustion"
+    assert evidence.high_severity_corroborating
+
+
+def test_log_fact_extraction_preserves_high_confidence_values() -> None:
+    message = (
+        "status=503 timeout=5000ms took 2.4s cpu=97% "
+        "active=100 max=100 remaining=0 queue=42 retries=3"
+    )
+    event = LogEvent(START, START, "worker", "ERROR", message)
+    extractor = LogEvidenceExtractor(
+        LogEvidenceConfig(semantic_similarity_threshold=0.8),
+        embedder=_DeterministicTestEmbedder(),
+    )
+
+    evidence = extractor.extract([event])[0]
+    facts = {(fact.fact_type, fact.name, fact.value, fact.unit) for fact in evidence.extracted_facts}
+
+    assert evidence.message == message
+    assert ("code", "status", "503", None) in facts
+    assert ("duration", "timeout", 5000, "ms") in facts
+    assert ("duration", "took", 2400, "ms") in facts
+    assert ("percentage", "cpu", 97, "%") in facts
+    assert ("count", "active", 100, "count") in facts
+    assert ("count", "remaining", 0, "count") in facts
+    assert ("count", "queue", 42, "count") in facts
+    assert ("count", "retries", 3, "count") in facts
 
 
 def test_end_to_end_incident_produces_meaningful_candidates_through_query_api() -> None:

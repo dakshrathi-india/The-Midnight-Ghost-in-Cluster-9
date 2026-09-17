@@ -87,12 +87,31 @@ def test_trace_parent_child_relationships_are_valid() -> None:
         by_trace.setdefault(span.trace_id, []).append(span)
     assert by_trace
     for trace in by_trace.values():
+        by_id = {span.span_id: span for span in trace}
         span_ids = {span.span_id for span in trace}
         roots = [span for span in trace if span.parent_span_id is None]
         assert len(roots) == 1
         assert all(
             span.parent_span_id is None or span.parent_span_id in span_ids for span in trace
         )
+        assert all(span.duration_ms >= 0 for span in trace)
+        children_by_parent: dict[str, list] = {}
+        for span in trace:
+            if span.parent_span_id is None:
+                continue
+            parent = by_id[span.parent_span_id]
+            child_end = span.start_timestamp + timedelta(milliseconds=span.duration_ms)
+            parent_end = parent.start_timestamp + timedelta(milliseconds=parent.duration_ms)
+            assert parent.start_timestamp <= span.start_timestamp
+            assert child_end <= parent_end
+            children_by_parent.setdefault(parent.span_id, []).append(span)
+        for siblings in children_by_parent.values():
+            ordered = sorted(siblings, key=lambda span: span.start_timestamp)
+            assert all(
+                left.start_timestamp + timedelta(milliseconds=left.duration_ms)
+                <= right.start_timestamp
+                for left, right in zip(ordered, ordered[1:])
+            )
 
 
 def test_fault_changes_state_and_cascades_upstream() -> None:
@@ -203,7 +222,34 @@ def test_decoy_anomaly_is_recorded_and_visible_in_metrics() -> None:
     baseline_cpu = incident.baseline.metric_summaries[(decoy, "cpu_utilization")].mean
 
     assert decoy != incident.ground_truth.root_service
+    assert decoy not in incident.ground_truth.affected_services
     assert max(event.value for event in cpu_events) > baseline_cpu + 0.25
+
+
+def test_decoy_is_omitted_when_every_service_is_structurally_affected() -> None:
+    fragmentation = FragmentationConfig(
+        clock_skew_range_seconds=0,
+        missing_observation_probability=0,
+        delayed_observation_probability=0,
+        metric_noise_fraction=0,
+        include_decoy_anomaly=True,
+    )
+    config = SimulationConfig(
+        services=(
+            ServiceConfig("entry", 80, 5, 40, ("store",)),
+            ServiceConfig("store", 70, 8),
+        ),
+        baseline_steps=3,
+        incident_steps=4,
+        fragmentation=fragmentation,
+    )
+
+    incident = IncidentGenerator(config).generate(
+        5, FaultRequest("store", "network_latency")
+    )
+
+    assert incident.ground_truth.affected_services == {"entry", "store"}
+    assert incident.ground_truth.decoy_services == ()
 
 
 def test_ground_truth_records_effective_default_fault_parameters() -> None:

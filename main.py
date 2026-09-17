@@ -1,19 +1,11 @@
-"""Demonstrate telemetry collection and observability intelligence without RCA."""
+"""Run the deterministic budget-aware diagnosis demonstration."""
 
 from __future__ import annotations
 
 from datetime import timedelta
 
 from src.core import QueryCosts, TelemetryQueryAPI
-from src.rca import (
-    CUSUMDetector,
-    CandidateGenerator,
-    CandidateStrength,
-    IsolationForestDetector,
-    LogEvidenceExtractor,
-    MADDetector,
-    TraceGraphAnalyzer,
-)
+from src.rca import CandidateStrength, DiagnosisAgent
 from src.simulation import FaultRequest, IncidentGenerator, benchmark_config
 
 
@@ -22,106 +14,71 @@ def main() -> None:
         seed=17,
         fault=FaultRequest(service="postgres", failure_mode="database_slowdown"),
     )
-    store = incident.telemetry
-    print(f"Incident: {incident.incident_id}")
-    print(f"Known services: {', '.join(sorted(incident.baseline.known_services))}")
-    print(
-        "Telemetry counts: "
-        f"metrics={store.metric_count}, logs={store.log_count}, spans={store.span_count}"
-    )
-
-    services = sorted(incident.baseline.known_services)
-    api = TelemetryQueryAPI(
-        store, total_budget=len(services) * 3, costs=QueryCosts()
-    )
-    start = max(
+    analysis_start = max(
         event.event_timestamp for event in incident.baseline.metric_history
     ) + timedelta(microseconds=1)
-    end = incident.observed_end_time
-    metrics_by_service = {
-        service: api.query_metrics(service, start, end) for service in services
-    }
-    logs = tuple(
-        event
-        for service in services
-        for event in api.query_logs(service, start, end)
-    )
-    spans = tuple(
-        event
-        for service in services
-        for event in api.query_traces(service, start, end)
-    )
-    api.query_metrics(services[0], start, end)
-    print(
-        f"Budget: spent={api.spent_budget}, remaining={api.remaining_budget}; "
-        f"repeat metric query cached={api.query_history[-1].served_from_cache}"
+    api = TelemetryQueryAPI(
+        incident.telemetry,
+        total_budget=17,
+        costs=QueryCosts(metrics=1, logs=1, traces=1),
     )
 
-    graph = TraceGraphAnalyzer().reconstruct(spans, incident.baseline)
-    mad_results = {
-        service: MADDetector().analyze(
-            service, metrics_by_service[service], incident.baseline
-        )
-        for service in services
-    }
-    change_results = {
-        service: CUSUMDetector().analyze(
-            service, metrics_by_service[service], incident.baseline
-        )
-        for service in services
-    }
-    isolation_results = {
-        service: IsolationForestDetector().analyze(
-            service, metrics_by_service[service], incident.baseline
-        )
-        for service in services
-    }
-    log_evidence = LogEvidenceExtractor().extract(logs)
-    candidates = CandidateGenerator().generate(
-        services,
-        mad_results,
-        change_results,
-        isolation_results,
-        graph.service_evidence,
-        log_evidence,
+    result = DiagnosisAgent().diagnose(
+        api,
+        incident.baseline,
+        analysis_start,
+        incident.observed_end_time,
     )
 
-    edge_text = ", ".join(
-        f"{edge.caller_service}->{edge.callee_service}({edge.support_count})"
-        for edge in graph.edges
-    )
-    print(f"Trace-derived edges: {edge_text}")
-    for service in services:
-        fired = [
-            name
-            for name, result in (
-                ("MAD", mad_results[service]),
-                ("CUSUM", change_results[service]),
-                ("IF", isolation_results[service]),
-            )
-            if result.flagged
-        ]
-        if fired:
-            print(f"Detector flags: {service}={'+'.join(fired)}")
-    visible_candidates = [
+    candidates = [
         candidate
-        for candidate in candidates
+        for candidate in result.candidates
         if candidate.strength is not CandidateStrength.NOT_CANDIDATE
     ]
+    print(f"Incident: {incident.incident_id}")
     print(
         "Candidates: "
         + ", ".join(
             f"{candidate.service}:{candidate.strength.value}"
-            for candidate in visible_candidates
+            for candidate in candidates
         )
     )
+    print(
+        "Query sequence: "
+        + " -> ".join(
+            f"{entry.query_type}({entry.service})[{entry.cost}]"
+            for entry in result.queries_executed
+        )
+    )
+    print(
+        f"Diagnosis status: {result.status.value}; "
+        f"budget={result.budget_spent}/{api.total_budget}"
+    )
+    if result.ranked_hypotheses:
+        best = result.ranked_hypotheses[0]
+        hypothesis = best.hypothesis
+        print(f"Best hypothesis: ({hypothesis.service}, {hypothesis.failure_mode})")
+        print(
+            "Supporting evidence: "
+            + "; ".join(
+                f"{item.category.value}:{item.observation}"
+                for item in best.supporting_evidence
+            )
+        )
+        print(
+            "Contradictions: "
+            + (
+                "; ".join(item.explanation for item in best.contradictions)
+                if best.contradictions
+                else "none"
+            )
+        )
 
-    print("Analysis input: queried canonical telemetry plus historical baseline only")
     truth = incident.ground_truth
     print(
-        "Evaluation-only ground truth (kept outside TelemetryQueryAPI): "
-        f"root=({truth.root_service}, {truth.failure_mode}), "
-        f"affected={len(truth.affected_services)}, decoys={list(truth.decoy_services)}"
+        "Evaluation-only ground truth: "
+        f"({truth.root_service}, {truth.failure_mode}); "
+        f"decoys={list(truth.decoy_services)}"
     )
 
 

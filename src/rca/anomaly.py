@@ -197,12 +197,26 @@ class CUSUMDetector:
 
 @dataclass(frozen=True, slots=True)
 class IsolationForestConfig:
+    core_features: tuple[str, ...] = (
+        "cpu_utilization",
+        "memory_utilization",
+        "request_latency_ms",
+        "error_rate",
+        "request_rate",
+    )
+    optional_features: tuple[str, ...] = ()
     random_state: int = 17
     contamination: str | float = 0.12
     n_estimators: int = 100
     minimum_baseline_samples: int = 4
     minimum_anomalous_samples: int = 3
     minimum_anomalous_fraction: float = 0.5
+
+    def __post_init__(self) -> None:
+        if len(set(self.core_features)) != len(self.core_features):
+            raise ValueError("core Isolation Forest features must be unique")
+        if len(set(self.optional_features)) != len(self.optional_features):
+            raise ValueError("optional Isolation Forest features must be unique")
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +246,14 @@ class IsolationForestDetector:
         incident_events = [event for event in incident_metrics if event.service == service]
         baseline_names = {event.metric_name for event in baseline_events}
         incident_names = {event.metric_name for event in incident_events}
-        feature_names = tuple(sorted(baseline_names & incident_names))
+        configured_features = tuple(
+            dict.fromkeys((*self.config.core_features, *self.config.optional_features))
+        )
+        feature_names = tuple(
+            name
+            for name in configured_features
+            if name in baseline_names and name in incident_names
+        )
         if not feature_names:
             return self._empty(service)
 

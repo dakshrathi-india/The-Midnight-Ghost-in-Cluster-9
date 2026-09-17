@@ -68,8 +68,11 @@ class QueryBudget:
     def remaining(self) -> int:
         return self._total - self._spent
 
+    def cost_for(self, query_type: str) -> int:
+        return self._costs.for_query(query_type)
+
     def charge(self, query_type: str) -> int:
-        cost = self._costs.for_query(query_type)
+        cost = self.cost_for(query_type)
         if cost > self.remaining:
             raise BudgetExceededError(
                 f"{query_type} query costs {cost}, but only {self.remaining} remains"

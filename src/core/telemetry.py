@@ -48,12 +48,6 @@ class TelemetryStore:
     def span_count(self) -> int:
         return len(self._spans)
 
-    @property
-    def services(self) -> frozenset[str]:
-        return frozenset(
-            event.service for event in (*self._metrics, *self._logs, *self._spans)
-        )
-
     def metrics_between(
         self, service: str, start_time: datetime, end_time: datetime
     ) -> tuple[MetricEvent, ...]:
@@ -119,6 +113,31 @@ class TelemetryQueryAPI:
     def query_history(self) -> tuple[QueryHistoryEntry, ...]:
         return tuple(self._history)
 
+    def query_cost(
+        self,
+        query_type: str,
+        service: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> int:
+        """Return the cost of a query, accounting for an exact cache hit."""
+        cache_key = self._optional_cache_key(
+            query_type, service, start_time, end_time
+        )
+        if cache_key is not None and cache_key in self._cache:
+            return 0
+        return self._budget.cost_for(query_type)
+
+    def can_afford(
+        self,
+        query_type: str,
+        service: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+    ) -> bool:
+        """Return whether the remaining budget covers a prospective query."""
+        return self.query_cost(query_type, service, start_time, end_time) <= self.remaining_budget
+
     def query_metrics(
         self, service: str, start_time: datetime, end_time: datetime
     ) -> tuple[MetricEvent, ...]:
@@ -162,6 +181,23 @@ class TelemetryQueryAPI:
         self._cache[cache_key] = result
         self._record(query_type, service, start, end, cost, False)
         return result
+
+    @staticmethod
+    def _optional_cache_key(
+        query_type: str,
+        service: str | None,
+        start_time: datetime | None,
+        end_time: datetime | None,
+    ) -> tuple[str, str, datetime, datetime] | None:
+        supplied = (service is not None, start_time is not None, end_time is not None)
+        if not any(supplied):
+            return None
+        if not all(supplied):
+            raise ValueError(
+                "service, start_time, and end_time must be supplied together"
+            )
+        assert service is not None and start_time is not None and end_time is not None
+        return (query_type, service, as_utc(start_time), as_utc(end_time))
 
     def _summarize(self, service: str, start: datetime, end: datetime) -> ServiceSummary:
         metrics = self.__store.metrics_between(service, start, end)

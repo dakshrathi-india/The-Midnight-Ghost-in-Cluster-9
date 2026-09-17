@@ -77,7 +77,6 @@ class IncidentGenerator:
                 (canonical_names[caller], canonical_names[dependency])
                 for caller, dependency in self.config.dependency_edges
             },
-            self.config.historical_context_counts_toward_budget,
         )
         offsets = self._clock_offsets(rng)
         decoys = self._select_decoys(rng, root_service)
@@ -146,7 +145,9 @@ class IncidentGenerator:
     def _select_decoys(self, rng: random.Random, root_service: str) -> tuple[str, ...]:
         if not self.config.fragmentation.include_decoy_anomaly:
             return ()
-        candidates = sorted(set(self.config.service_map) - {root_service})
+        candidates = sorted(
+            set(self.config.service_map) - self._affected_services(root_service)
+        )
         return (rng.choice(candidates),) if candidates else ()
 
     def _apply_imperfections(

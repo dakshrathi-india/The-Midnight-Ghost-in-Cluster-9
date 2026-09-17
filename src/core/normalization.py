@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import datetime
+from typing import Callable, TypeVar
 
 from .models import LogEvent, MetricEvent, SpanEvent, as_utc
+
+EventT = TypeVar("EventT", MetricEvent, LogEvent, SpanEvent)
 
 
 class TelemetryNormalizer:
@@ -47,7 +51,17 @@ class TelemetryNormalizer:
                     unit=target_unit,
                 )
             )
-        return self._deduplicate(normalized)
+        return self._deduplicate(
+            normalized,
+            lambda event: (
+                event.service,
+                event.metric_name,
+                event.event_timestamp,
+                event.value,
+                event.unit,
+            ),
+            lambda event: event.arrival_timestamp,
+        )
 
     def normalize_logs(self, events: list[LogEvent] | tuple[LogEvent, ...]) -> tuple[LogEvent, ...]:
         normalized = [
@@ -63,7 +77,17 @@ class TelemetryNormalizer:
             )
             for event in events
         ]
-        return self._deduplicate(normalized)
+        return self._deduplicate(
+            normalized,
+            lambda event: (
+                event.service,
+                event.event_timestamp,
+                event.severity,
+                event.message,
+                event.trace_id,
+            ),
+            lambda event: event.arrival_timestamp,
+        )
 
     def normalize_spans(self, events: list[SpanEvent] | tuple[SpanEvent, ...]) -> tuple[SpanEvent, ...]:
         normalized = [
@@ -77,8 +101,26 @@ class TelemetryNormalizer:
             )
             for event in events
         ]
-        return self._deduplicate(normalized)
+        return self._deduplicate(
+            normalized,
+            lambda event: (event.trace_id, event.span_id),
+            lambda event: event.arrival_timestamp,
+        )
 
     @staticmethod
-    def _deduplicate(events: list[object]) -> tuple:
-        return tuple(dict.fromkeys(events))
+    def _deduplicate(
+        events: list[EventT],
+        identity: Callable[[EventT], tuple[object, ...]],
+        arrival_time: Callable[[EventT], datetime],
+    ) -> tuple[EventT, ...]:
+        selected: dict[tuple[object, ...], EventT] = {}
+        for event in events:
+            key = identity(event)
+            current = selected.get(key)
+            if current is None or (
+                arrival_time(event), repr(event)
+            ) < (
+                arrival_time(current), repr(current)
+            ):
+                selected[key] = event
+        return tuple(selected.values())

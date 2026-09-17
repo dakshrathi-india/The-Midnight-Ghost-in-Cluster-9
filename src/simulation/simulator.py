@@ -225,15 +225,40 @@ class MicroserviceSimulator:
         spans: list[SpanEvent] = []
         counter = 0
 
-        def visit(service_name: str, trace_id: str, parent_id: str | None, depth: int) -> None:
+        def visit(
+            service_name: str,
+            trace_id: str,
+            parent_id: str | None,
+            start_timestamp: datetime,
+        ) -> float:
             nonlocal counter
             counter += 1
             span_id = f"s{step:03d}-{counter:04d}"
             state = states[service_name]
             failed = self._rng.random() < state.error_rate
-            start_timestamp = true_time + timedelta(milliseconds=depth)
-            duration_ms = max(0.1, state.latency_ms * self._rng.uniform(0.9, 1.1))
-            spans.append(
+            dependencies = self._service_map[service_name].dependencies
+            modeled_dependency_ms = sum(
+                states[dependency].latency_ms for dependency in dependencies
+            )
+            modeled_local_ms = max(0.1, state.latency_ms - modeled_dependency_ms)
+            local_duration_ms = max(
+                0.1, modeled_local_ms * self._rng.uniform(0.9, 1.1)
+            )
+
+            # Dependency spans are sequential, bracketed by equal local work phases.
+            cursor = start_timestamp + timedelta(milliseconds=local_duration_ms / 2)
+            dependency_duration_ms = 0.0
+            insertion_index = len(spans)
+            for dependency in dependencies:
+                child_duration_ms = visit(
+                    dependency, trace_id, span_id, cursor
+                )
+                dependency_duration_ms += child_duration_ms
+                cursor += timedelta(milliseconds=child_duration_ms)
+
+            duration_ms = local_duration_ms + dependency_duration_ms
+            spans.insert(
+                insertion_index,
                 SpanEvent(
                     trace_id=trace_id,
                     span_id=span_id,
@@ -247,10 +272,9 @@ class MicroserviceSimulator:
                     status="ERROR" if failed else "OK",
                 )
             )
-            for dependency in self._service_map[service_name].dependencies:
-                visit(dependency, trace_id, span_id, depth + 1)
+            return duration_ms
 
         for root in self.config.root_services:
             for sample in range(self.config.traces_per_root_per_step):
-                visit(root, f"trace-{step:03d}-{root}-{sample}", None, 0)
+                visit(root, f"trace-{step:03d}-{root}-{sample}", None, true_time)
         return spans

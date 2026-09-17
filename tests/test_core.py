@@ -68,6 +68,56 @@ def test_normalization_preserves_and_normalizes_event_and_arrival_timestamps() -
     assert logs[0].message == "slow request"
 
 
+def test_semantic_deduplication_prefers_earliest_arrival() -> None:
+    late = NOW + timedelta(seconds=8)
+    early = NOW + timedelta(seconds=2)
+    normalizer = TelemetryNormalizer()
+
+    metrics = normalizer.normalize_metrics(
+        [
+            MetricEvent(NOW, late, "api", "cpu", 0.5, "ratio"),
+            MetricEvent(NOW, early, "api", "cpu", 0.5, "ratio"),
+        ]
+    )
+    logs = normalizer.normalize_logs(
+        [
+            LogEvent(NOW, late, "api", "ERROR", "failed", "trace-1"),
+            LogEvent(NOW, early, "api", "ERROR", "failed", "trace-1"),
+        ]
+    )
+    spans = normalizer.normalize_spans(
+        [
+            SpanEvent("trace-1", "span-1", None, "api", "work", NOW, late, 5, "OK"),
+            SpanEvent("trace-1", "span-1", None, "api", "work", NOW, early, 5, "OK"),
+        ]
+    )
+
+    assert len(metrics) == len(logs) == len(spans) == 1
+    assert metrics[0].arrival_timestamp == early
+    assert logs[0].arrival_timestamp == early
+    assert spans[0].arrival_timestamp == early
+
+
+def test_semantic_deduplication_keeps_distinct_events() -> None:
+    normalizer = TelemetryNormalizer()
+
+    metrics = normalizer.normalize_metrics(
+        [
+            MetricEvent(NOW, NOW, "api", "cpu", 0.5, "ratio"),
+            MetricEvent(NOW, NOW, "api", "cpu", 0.6, "ratio"),
+        ]
+    )
+    logs = normalizer.normalize_logs(
+        [
+            LogEvent(NOW, NOW, "api", "ERROR", "failure one", "trace-1"),
+            LogEvent(NOW, NOW, "api", "ERROR", "failure two", "trace-1"),
+        ]
+    )
+
+    assert len(metrics) == 2
+    assert len(logs) == 2
+
+
 def test_budget_costs_cache_and_history() -> None:
     api = TelemetryQueryAPI(
         _store(), total_budget=6, costs=QueryCosts(metrics=1, logs=2, traces=3)
