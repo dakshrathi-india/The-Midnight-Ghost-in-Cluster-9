@@ -362,7 +362,7 @@ def test_normal_optional_metric_is_neutral() -> None:
     assert queue.status is EvidenceStatus.NEUTRAL
 
 
-def test_matching_early_log_category_supports_failure_mode() -> None:
+def test_matching_log_supports_failure_mode_when_service_onset_is_unavailable() -> None:
     baseline = _baseline()
     hypothesis = Hypothesis("worker", "cpu_saturation", CandidateStrength.STRONG)
     timestamp = START + timedelta(seconds=100)
@@ -389,7 +389,70 @@ def test_matching_early_log_category_supports_failure_mode() -> None:
     )
 
 
-def test_unrelated_early_log_does_not_suppress_later_matching_category() -> None:
+def _process_crash_log_evaluation(log_offset: int) -> HypothesisEvaluation:
+    baseline = _baseline()
+    hypothesis = Hypothesis("worker", "process_crash", CandidateStrength.STRONG)
+    metrics = [
+        _metric(100 + index, "worker", "error_rate", 100.0)
+        for index in range(3)
+    ]
+    event_timestamp = START + timedelta(seconds=log_offset)
+    delayed_arrival = event_timestamp + timedelta(minutes=5)
+    log = LogEvidence(
+        "worker",
+        "ERROR",
+        "service process became unavailable",
+        event_timestamp,
+        delayed_arrival,
+        None,
+        "process_unavailable",
+        0.8,
+        True,
+    )
+    evaluator = HypothesisEvaluator(
+        config=DiagnosisConfig(temporal_tolerance=timedelta(seconds=5))
+    )
+    return evaluator.evaluate_all(
+        [hypothesis],
+        [_candidate("worker")],
+        {"worker": metrics},
+        [log],
+        (),
+        set(),
+        baseline,
+    )[0]
+
+
+def _log_item(evaluation: HypothesisEvaluation) -> CausalEvidence:
+    return next(
+        item
+        for item in evaluation.evidence
+        if item.category is EvidenceCategory.LOG_SEMANTIC
+    )
+
+
+def test_matching_semantic_log_at_service_onset_is_support() -> None:
+    evidence = _log_item(_process_crash_log_evaluation(100))
+
+    assert evidence.status is EvidenceStatus.SUPPORT
+    assert evidence.event_timestamp == START + timedelta(seconds=100)
+
+
+def test_matching_semantic_log_within_onset_tolerance_is_support() -> None:
+    evidence = _log_item(_process_crash_log_evaluation(104))
+
+    assert evidence.status is EvidenceStatus.SUPPORT
+    assert evidence.event_timestamp == START + timedelta(seconds=104)
+
+
+def test_matching_semantic_log_after_known_onset_is_neutral() -> None:
+    evidence = _log_item(_process_crash_log_evaluation(120))
+
+    assert evidence.status is EvidenceStatus.NEUTRAL
+    assert evidence.event_timestamp == START + timedelta(seconds=120)
+
+
+def test_unrelated_early_log_does_not_suppress_later_matching_category_without_onset() -> None:
     baseline = _baseline()
     hypothesis = Hypothesis(
         "worker", "database_slowdown", CandidateStrength.STRONG
@@ -659,7 +722,7 @@ def test_log_timestamps_do_not_break_equal_causal_ranking_tie() -> None:
             ),
             ("worker",),
             (),
-            RankingComponents(0, 0, 1, 1, 1, 1),
+            RankingComponents(0, 0, 1, 1, 1),
         )
 
     later = evaluation("database_slowdown", START + timedelta(seconds=60))
@@ -668,6 +731,97 @@ def test_log_timestamps_do_not_break_equal_causal_ranking_tie() -> None:
 
     assert earlier.ranking.core_key() == later.ranking.core_key()
     assert ranked[0] is later
+    assert not DiagnosisAgent._is_resolved(ranked)
+
+
+def test_individual_metric_support_count_does_not_break_causal_tie() -> None:
+    baseline = _baseline()
+    metrics = [
+        *[
+            _metric(100 + index, "worker", "error_rate", 100.0)
+            for index in range(3)
+        ],
+        *[
+            _metric(100 + index, "worker", "request_latency_ms", 100.0, "ms")
+            for index in range(3)
+        ],
+    ]
+    hypotheses = (
+        Hypothesis("worker", "deployment_regression", CandidateStrength.STRONG),
+        Hypothesis("worker", "process_crash", CandidateStrength.STRONG),
+    )
+
+    evaluations = HypothesisEvaluator().evaluate_all(
+        hypotheses,
+        [_candidate("worker")],
+        {"worker": metrics},
+        (),
+        (),
+        set(),
+        baseline,
+    )
+    deployment, process = evaluations
+    deployment_metric_supports = sum(
+        item.category is EvidenceCategory.METRIC_PATTERN
+        and item.status is EvidenceStatus.SUPPORT
+        for item in deployment.evidence
+    )
+    process_metric_supports = sum(
+        item.category is EvidenceCategory.METRIC_PATTERN
+        and item.status is EvidenceStatus.SUPPORT
+        for item in process.evidence
+    )
+    ranked = rank_evaluations(evaluations)
+
+    assert deployment_metric_supports == 2
+    assert process_metric_supports == 1
+    assert deployment.ranking.core_key() == process.ranking.core_key()
+    assert not DiagnosisAgent._is_resolved(ranked)
+
+
+def test_semantic_similarity_magnitude_does_not_affect_causal_ranking() -> None:
+    timestamp = START + timedelta(seconds=100)
+    hypotheses = (
+        Hypothesis("worker", "deployment_regression", CandidateStrength.STRONG),
+        Hypothesis("worker", "process_crash", CandidateStrength.STRONG),
+    )
+    logs = (
+        LogEvidence(
+            "worker",
+            "ERROR",
+            "deployment symptom",
+            timestamp,
+            timestamp,
+            None,
+            "deployment_regression",
+            0.99,
+            True,
+        ),
+        LogEvidence(
+            "worker",
+            "ERROR",
+            "process unavailable",
+            timestamp,
+            timestamp,
+            None,
+            "process_unavailable",
+            0.45,
+            True,
+        ),
+    )
+
+    evaluations = HypothesisEvaluator().evaluate_all(
+        hypotheses,
+        [_candidate("worker")],
+        {"worker": ()},
+        logs,
+        (),
+        set(),
+        _baseline(),
+    )
+    ranked = rank_evaluations(evaluations)
+
+    assert evaluations[0].ranking.core_key() == evaluations[1].ranking.core_key()
     assert not DiagnosisAgent._is_resolved(ranked)
 
 
@@ -876,23 +1030,19 @@ def test_end_to_end_cpu_saturation_resolves_correct_pair() -> None:
     assert result.budget_spent <= 17
 
 
-def test_process_crash_retains_injected_service_and_matching_hypothesis() -> None:
+def test_end_to_end_process_crash_resolves_correct_pair() -> None:
     incident, result = _run_incident(
         "auth", "process_crash", _controlled_fragmentation()
     )
-    process_evaluation = next(
-        evaluation
-        for evaluation in result.ranked_hypotheses
-        if evaluation.hypothesis.service == incident.ground_truth.root_service
-        and evaluation.hypothesis.failure_mode == incident.ground_truth.failure_mode
-    )
 
+    assert result.status is DiagnosisStatus.RESOLVED
     assert result.best_hypothesis is not None
-    assert result.best_hypothesis.service == incident.ground_truth.root_service
-    assert any(
-        evidence.category is EvidenceCategory.LOG_SEMANTIC
-        and evidence.status is EvidenceStatus.SUPPORT
-        for evidence in process_evaluation.evidence
+    assert (
+        result.best_hypothesis.service,
+        result.best_hypothesis.failure_mode,
+    ) == (
+        incident.ground_truth.root_service,
+        incident.ground_truth.failure_mode,
     )
     assert result.budget_spent <= 17
 

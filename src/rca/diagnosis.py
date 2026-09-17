@@ -104,16 +104,14 @@ class RankingComponents:
     explained_strong_count: int
     supporting_category_count: int
     direct_support_count: int
-    direct_support_observation_count: int = 0
 
-    def core_key(self) -> tuple[int, int, int, int, int, int]:
+    def core_key(self) -> tuple[int, int, int, int, int]:
         return (
             self.contradiction_count,
             self.unexplained_strong_count,
             -self.explained_strong_count,
             -self.supporting_category_count,
             -self.direct_support_count,
-            -self.direct_support_observation_count,
         )
 
 
@@ -135,7 +133,7 @@ class HypothesisEvaluation:
             item for item in self.evidence if item.status is EvidenceStatus.CONTRADICTION
         )
 
-    def sort_key(self) -> tuple[int, int, int, int, int, int, str, str]:
+    def sort_key(self) -> tuple[int, int, int, int, int, str, str]:
         return (*self.ranking.core_key(), self.hypothesis.service, self.hypothesis.failure_mode)
 
 
@@ -441,7 +439,14 @@ class HypothesisEvaluator:
         signature = self.signatures.get(hypothesis.failure_mode)
         evidence: list[CausalEvidence] = [self._candidate_evidence(hypothesis)]
         evidence.extend(self._metric_evidence(hypothesis, signature, patterns))
-        evidence.extend(self._log_evidence(hypothesis, signature, logs))
+        evidence.extend(
+            self._log_evidence(
+                hypothesis,
+                signature,
+                logs,
+                onsets.get(hypothesis.service),
+            )
+        )
         evidence.append(self._trace_evidence(hypothesis, signature, localization))
 
         strong_candidates = sorted(
@@ -522,25 +527,12 @@ class HypothesisEvaluator:
                 EvidenceCategory.CANDIDATE_STRENGTH,
             }
         }
-        direct_observations = sum(
-            item.status is EvidenceStatus.SUPPORT
-            and item.service == hypothesis.service
-            and item.category
-            in {
-                EvidenceCategory.METRIC_PATTERN,
-                EvidenceCategory.LOG_SEMANTIC,
-                EvidenceCategory.TRACE_LOCALIZATION,
-                EvidenceCategory.CANDIDATE_STRENGTH,
-            }
-            for item in evidence
-        )
         ranking = RankingComponents(
             contradictions,
             len(unexplained),
             len(explained),
             len(supporting_categories),
             len(direct_categories),
-            direct_observations,
         )
         return HypothesisEvaluation(
             hypothesis,
@@ -624,6 +616,7 @@ class HypothesisEvaluator:
         hypothesis: Hypothesis,
         signature: FailureSignature,
         logs: Sequence[LogEvidence],
+        service_onset: datetime | None,
     ) -> list[CausalEvidence]:
         matching = [
             item
@@ -642,12 +635,35 @@ class HypothesisEvaluator:
                     f"No queried {hypothesis.service} log matches {hypothesis.failure_mode}.",
                 )
             ]
-        earliest_time = min(item.event_timestamp for item in matching)
-        relevant = [
-            item
-            for item in matching
-            if item.event_timestamp <= earliest_time + self.config.temporal_tolerance
-        ]
+        if service_onset is None:
+            earliest_time = min(item.event_timestamp for item in matching)
+            relevant = [
+                item
+                for item in matching
+                if item.event_timestamp
+                <= earliest_time + self.config.temporal_tolerance
+            ]
+            status = EvidenceStatus.SUPPORT
+        else:
+            relevant = [
+                item
+                for item in matching
+                if abs(item.event_timestamp - service_onset)
+                <= self.config.temporal_tolerance
+            ]
+            status = (
+                EvidenceStatus.SUPPORT
+                if relevant
+                else EvidenceStatus.NEUTRAL
+            )
+            if not relevant:
+                earliest_time = min(item.event_timestamp for item in matching)
+                relevant = [
+                    item
+                    for item in matching
+                    if item.event_timestamp
+                    <= earliest_time + self.config.temporal_tolerance
+                ]
         best = min(
             relevant,
             key=lambda item: (
@@ -662,9 +678,15 @@ class HypothesisEvaluator:
                 hypothesis.service,
                 hypothesis.failure_mode,
                 f"{best.semantic_category}; similarity={best.similarity_score:.3f}",
-                EvidenceStatus.SUPPORT,
-                f"{hypothesis.service} log evidence matches {best.semantic_category} "
-                f"with similarity {best.similarity_score:.3f}.",
+                status,
+                (
+                    f"{hypothesis.service} log evidence matches {best.semantic_category} "
+                    f"with similarity {best.similarity_score:.3f}."
+                    if status is EvidenceStatus.SUPPORT
+                    else f"{hypothesis.service} log evidence matches "
+                    f"{best.semantic_category}, but its event time is outside the "
+                    "service metric-onset tolerance."
+                ),
                 best.event_timestamp,
             )
         ]
