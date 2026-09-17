@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from statistics import fmean, median, pstdev
 from types import MappingProxyType
@@ -18,18 +17,8 @@ class MetricSummary:
     standard_deviation: float
     minimum: float
     maximum: float
-    median: float = math.nan
-    median_absolute_deviation: float = math.nan
-
-    def __post_init__(self) -> None:
-        if math.isnan(self.median):
-            object.__setattr__(self, "median", self.mean)
-        if math.isnan(self.median_absolute_deviation):
-            object.__setattr__(
-                self,
-                "median_absolute_deviation",
-                self.standard_deviation * 0.67448975,
-            )
+    median: float
+    median_absolute_deviation: float
 
 
 class BaselineStore:
