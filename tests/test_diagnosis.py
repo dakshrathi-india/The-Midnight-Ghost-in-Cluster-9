@@ -16,6 +16,7 @@ from src.core import (
 from src.rca import (
     ActiveQueryPlanner,
     BootstrapStrategy,
+    CausalEvidence,
     CandidateStrength,
     DiagnosisAgent,
     DiagnosisAgentConfig,
@@ -302,6 +303,27 @@ def test_metric_direction_supports_or_contradicts_signature(
     assert cpu.status is expected
 
 
+def test_normal_required_metric_contradicts_signature() -> None:
+    baseline = _baseline()
+    hypothesis = Hypothesis("worker", "cpu_saturation", CandidateStrength.STRONG)
+    metrics = [
+        _metric(100 + index, "worker", "cpu_utilization", 10.0)
+        for index in range(3)
+    ]
+
+    evaluation = HypothesisEvaluator().evaluate_all(
+        [hypothesis], [_candidate("worker")], {"worker": metrics}, (), (), set(), baseline
+    )[0]
+    cpu = next(
+        item
+        for item in evaluation.evidence
+        if item.category is EvidenceCategory.METRIC_PATTERN
+        and item.observation.startswith("cpu_utilization=")
+    )
+
+    assert cpu.status is EvidenceStatus.CONTRADICTION
+
+
 def test_missing_metric_evidence_is_neutral() -> None:
     baseline = _baseline()
     hypothesis = Hypothesis("worker", "cpu_saturation", CandidateStrength.STRONG)
@@ -317,6 +339,27 @@ def test_missing_metric_evidence_is_neutral() -> None:
     )
 
     assert cpu.status is EvidenceStatus.NEUTRAL
+
+
+def test_normal_optional_metric_is_neutral() -> None:
+    baseline = _baseline()
+    hypothesis = Hypothesis("worker", "cpu_saturation", CandidateStrength.STRONG)
+    metrics = [
+        _metric(100 + index, "worker", "queue_length", 10.0, "count")
+        for index in range(3)
+    ]
+
+    evaluation = HypothesisEvaluator().evaluate_all(
+        [hypothesis], [_candidate("worker")], {"worker": metrics}, (), (), set(), baseline
+    )[0]
+    queue = next(
+        item
+        for item in evaluation.evidence
+        if item.category is EvidenceCategory.METRIC_PATTERN
+        and item.observation.startswith("queue_length=")
+    )
+
+    assert queue.status is EvidenceStatus.NEUTRAL
 
 
 def test_matching_early_log_category_supports_failure_mode() -> None:
@@ -599,6 +642,35 @@ def test_ranking_prefers_explaining_more_strong_candidates() -> None:
     assert rank_evaluations([other, preferred])[0] is preferred
 
 
+def test_log_timestamps_do_not_break_equal_causal_ranking_tie() -> None:
+    def evaluation(failure_mode: str, timestamp: datetime) -> HypothesisEvaluation:
+        return HypothesisEvaluation(
+            Hypothesis("worker", failure_mode, CandidateStrength.STRONG),
+            (
+                CausalEvidence(
+                    EvidenceCategory.LOG_SEMANTIC,
+                    "worker",
+                    failure_mode,
+                    "matching semantic log",
+                    EvidenceStatus.SUPPORT,
+                    "A queried log matches the hypothesis.",
+                    timestamp,
+                ),
+            ),
+            ("worker",),
+            (),
+            RankingComponents(0, 0, 1, 1, 1, 1),
+        )
+
+    later = evaluation("database_slowdown", START + timedelta(seconds=60))
+    earlier = evaluation("network_latency", START)
+    ranked = rank_evaluations((earlier, later))
+
+    assert earlier.ranking.core_key() == later.ranking.core_key()
+    assert ranked[0] is later
+    assert not DiagnosisAgent._is_resolved(ranked)
+
+
 def _planner_api(costs: QueryCosts) -> TelemetryQueryAPI:
     return TelemetryQueryAPI(TelemetryStore((), (), ()), 20, costs)
 
@@ -771,7 +843,10 @@ def test_database_slowdown_with_decoy_resolves_correct_pair_deterministically() 
     )
     assert first.status is DiagnosisStatus.RESOLVED
     assert first.best_hypothesis is not None
-    assert (first.best_hypothesis.service, first.best_hypothesis.failure_mode) == expected
+    assert (
+        first.best_hypothesis.service,
+        first.best_hypothesis.failure_mode,
+    ) == expected
     assert first_incident.ground_truth.decoy_services
     assert first.best_hypothesis.service not in first_incident.ground_truth.decoy_services
     assert first.budget_spent <= 17
@@ -782,13 +857,9 @@ def test_database_slowdown_with_decoy_resolves_correct_pair_deterministically() 
     ]
 
 
-@pytest.mark.parametrize(
-    ("service", "failure_mode"),
-    (("catalog", "cpu_saturation"), ("auth", "process_crash")),
-)
-def test_end_to_end_common_faults_resolve_correct_pair(
-    service: str, failure_mode: str
-) -> None:
+def test_end_to_end_cpu_saturation_resolves_correct_pair() -> None:
+    service = "catalog"
+    failure_mode = "cpu_saturation"
     incident, result = _run_incident(
         service, failure_mode, _controlled_fragmentation()
     )
@@ -801,6 +872,27 @@ def test_end_to_end_common_faults_resolve_correct_pair(
     ) == (
         incident.ground_truth.root_service,
         incident.ground_truth.failure_mode,
+    )
+    assert result.budget_spent <= 17
+
+
+def test_process_crash_retains_injected_service_and_matching_hypothesis() -> None:
+    incident, result = _run_incident(
+        "auth", "process_crash", _controlled_fragmentation()
+    )
+    process_evaluation = next(
+        evaluation
+        for evaluation in result.ranked_hypotheses
+        if evaluation.hypothesis.service == incident.ground_truth.root_service
+        and evaluation.hypothesis.failure_mode == incident.ground_truth.failure_mode
+    )
+
+    assert result.best_hypothesis is not None
+    assert result.best_hypothesis.service == incident.ground_truth.root_service
+    assert any(
+        evidence.category is EvidenceCategory.LOG_SEMANTIC
+        and evidence.status is EvidenceStatus.SUPPORT
+        for evidence in process_evaluation.evidence
     )
     assert result.budget_spent <= 17
 

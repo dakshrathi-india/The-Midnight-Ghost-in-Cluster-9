@@ -105,16 +105,14 @@ class RankingComponents:
     supporting_category_count: int
     direct_support_count: int
     direct_support_observation_count: int = 0
-    direct_log_delay_seconds: float = float("inf")
 
-    def core_key(self) -> tuple[int, int, int, int, int, float, int]:
+    def core_key(self) -> tuple[int, int, int, int, int, int]:
         return (
             self.contradiction_count,
             self.unexplained_strong_count,
             -self.explained_strong_count,
             -self.supporting_category_count,
             -self.direct_support_count,
-            self.direct_log_delay_seconds,
             -self.direct_support_observation_count,
         )
 
@@ -137,7 +135,7 @@ class HypothesisEvaluation:
             item for item in self.evidence if item.status is EvidenceStatus.CONTRADICTION
         )
 
-    def sort_key(self) -> tuple[int, int, int, int, int, float, int, str, str]:
+    def sort_key(self) -> tuple[int, int, int, int, int, int, str, str]:
         return (*self.ranking.core_key(), self.hypothesis.service, self.hypothesis.failure_mode)
 
 
@@ -536,35 +534,6 @@ class HypothesisEvaluator:
             }
             for item in evidence
         )
-        earliest_service_semantic_time = min(
-            (
-                item.event_timestamp
-                for item in logs
-                if item.service == hypothesis.service
-                and item.semantic_category is not None
-            ),
-            default=None,
-        )
-        direct_log_time = min(
-            (
-                item.event_timestamp
-                for item in evidence
-                if item.status is EvidenceStatus.SUPPORT
-                and item.service == hypothesis.service
-                and item.category is EvidenceCategory.LOG_SEMANTIC
-                and item.event_timestamp is not None
-            ),
-            default=None,
-        )
-        direct_log_delay_seconds = (
-            max(
-                0.0,
-                (direct_log_time - earliest_service_semantic_time).total_seconds(),
-            )
-            if direct_log_time is not None
-            and earliest_service_semantic_time is not None
-            else float("inf")
-        )
         ranking = RankingComponents(
             contradictions,
             len(unexplained),
@@ -572,7 +541,6 @@ class HypothesisEvaluator:
             len(supporting_categories),
             len(direct_categories),
             direct_observations,
-            direct_log_delay_seconds,
         )
         return HypothesisEvaluation(
             hypothesis,
@@ -626,7 +594,10 @@ class HypothesisEvaluator:
             )
             if pattern.direction is expected:
                 status = EvidenceStatus.SUPPORT
-            elif pattern.direction is opposite and expectation.required:
+            elif expectation.required and pattern.direction in {
+                MetricPatternDirection.NORMAL,
+                opposite,
+            }:
                 status = EvidenceStatus.CONTRADICTION
             else:
                 status = EvidenceStatus.NEUTRAL
