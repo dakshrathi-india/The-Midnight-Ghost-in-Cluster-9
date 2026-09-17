@@ -236,6 +236,45 @@ def test_temporal_precedence_uses_clock_skew_tolerance(
     assert _temporal_item(_temporal_evaluation(root_offset, caller_offset)).status is expected
 
 
+def test_service_onset_ignores_transient_normal_metric() -> None:
+    baseline = _baseline(
+        ("root-node", "caller-node"), {("caller-node", "root-node")}
+    )
+    root_metrics = [
+        _metric(100, "root-node", "cpu_utilization", 100.0),
+        *[
+            _metric(offset, "root-node", "cpu_utilization", 10.0)
+            for offset in range(101, 106)
+        ],
+        *[
+            _metric(offset, "root-node", "request_latency_ms", 100.0, "ms")
+            for offset in range(200, 203)
+        ],
+    ]
+    caller_metrics = [
+        _metric(offset, "caller-node", "request_latency_ms", 90.0, "ms")
+        for offset in range(220, 223)
+    ]
+    evaluator = HypothesisEvaluator()
+    patterns = evaluator.metric_patterns("root-node", root_metrics, baseline)
+
+    evaluation = evaluator.evaluate_all(
+        [Hypothesis("root-node", "database_slowdown", CandidateStrength.STRONG)],
+        [_candidate("root-node"), _candidate("caller-node")],
+        {"root-node": root_metrics, "caller-node": caller_metrics},
+        (),
+        (),
+        {("caller-node", "root-node")},
+        baseline,
+    )[0]
+    temporal = _temporal_item(evaluation)
+
+    assert patterns["cpu_utilization"].direction.value == "NORMAL"
+    assert patterns["cpu_utilization"].onset_time is None
+    assert temporal.status is EvidenceStatus.SUPPORT
+    assert f"root={(START + timedelta(seconds=200)).isoformat()}" in temporal.observation
+
+
 @pytest.mark.parametrize(
     ("incident_value", "expected"),
     ((40.0, EvidenceStatus.SUPPORT), (-20.0, EvidenceStatus.CONTRADICTION)),
@@ -307,6 +346,52 @@ def test_matching_early_log_category_supports_failure_mode() -> None:
     )
 
 
+def test_unrelated_early_log_does_not_suppress_later_matching_category() -> None:
+    baseline = _baseline()
+    hypothesis = Hypothesis(
+        "worker", "database_slowdown", CandidateStrength.STRONG
+    )
+    early_time = START + timedelta(seconds=100)
+    later_time = START + timedelta(seconds=140)
+    logs = (
+        LogEvidence(
+            "worker",
+            "ERROR",
+            "CPU resource pressure",
+            early_time,
+            early_time,
+            None,
+            "resource_pressure",
+            0.9,
+            True,
+        ),
+        LogEvidence(
+            "worker",
+            "ERROR",
+            "database operations exceeded normal latency",
+            later_time,
+            later_time,
+            None,
+            "database_slowdown",
+            0.8,
+            True,
+        ),
+    )
+
+    evaluation = HypothesisEvaluator().evaluate_all(
+        [hypothesis], [_candidate("worker")], {"worker": ()}, logs, (), set(), baseline
+    )[0]
+    evidence = next(
+        item
+        for item in evaluation.evidence
+        if item.category is EvidenceCategory.LOG_SEMANTIC
+    )
+
+    assert evidence.status is EvidenceStatus.SUPPORT
+    assert evidence.observation.startswith("database_slowdown;")
+    assert evidence.event_timestamp == later_time
+
+
 def test_trace_localization_distinguishes_local_and_dependency_latency() -> None:
     baseline = _baseline(("front", "storage"), {("front", "storage")})
     local = TraceLocalizer().localize(
@@ -328,6 +413,41 @@ def test_trace_localization_distinguishes_local_and_dependency_latency() -> None
     assert dependency.mean_dependency_fraction_lower_bound == pytest.approx(0.9)
     assert dependency.mean_dependency_fraction_upper_bound == pytest.approx(0.9)
     assert dependency.mean_local_duration_ms == pytest.approx(10)
+
+
+def test_service_seeded_trace_query_enables_dependency_localization() -> None:
+    baseline = _baseline(
+        ("front", "worker", "datastore"),
+        {("front", "worker"), ("worker", "datastore")},
+    )
+    store = TelemetryStore(
+        (),
+        (),
+        (
+            _span("nested", "front-span", None, "front", 120),
+            _span("nested", "worker-span", "front-span", "worker", 100),
+            _span(
+                "nested",
+                "datastore-span",
+                "worker-span",
+                "datastore",
+                90,
+            ),
+        ),
+    )
+    api = TelemetryQueryAPI(store, total_budget=1)
+
+    spans = api.query_traces(
+        "worker", START + timedelta(seconds=100), START + timedelta(seconds=100)
+    )
+    localization = TraceLocalizer().localize(
+        "worker", spans, {("worker", "datastore")}, baseline
+    )
+
+    assert {span.service for span in spans} == {"front", "worker", "datastore"}
+    assert localization.kind is TraceLocalizationKind.DEPENDENCY
+    assert localization.dependency_service == "datastore"
+    assert api.spent_budget == 1
 
 
 def test_trace_localization_identifies_mostly_local_parent_time() -> None:

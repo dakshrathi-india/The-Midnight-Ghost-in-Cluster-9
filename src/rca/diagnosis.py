@@ -45,6 +45,7 @@ class CausalEvidence:
     observation: str
     status: EvidenceStatus
     explanation: str
+    event_timestamp: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,14 +105,16 @@ class RankingComponents:
     supporting_category_count: int
     direct_support_count: int
     direct_support_observation_count: int = 0
+    direct_log_delay_seconds: float = float("inf")
 
-    def core_key(self) -> tuple[int, int, int, int, int, int]:
+    def core_key(self) -> tuple[int, int, int, int, int, float, int]:
         return (
             self.contradiction_count,
             self.unexplained_strong_count,
             -self.explained_strong_count,
             -self.supporting_category_count,
             -self.direct_support_count,
+            self.direct_log_delay_seconds,
             -self.direct_support_observation_count,
         )
 
@@ -134,7 +137,7 @@ class HypothesisEvaluation:
             item for item in self.evidence if item.status is EvidenceStatus.CONTRADICTION
         )
 
-    def sort_key(self) -> tuple[int, int, int, int, int, int, str, str]:
+    def sort_key(self) -> tuple[int, int, int, int, int, float, int, str, str]:
         return (*self.ranking.core_key(), self.hypothesis.service, self.hypothesis.failure_mode)
 
 
@@ -301,7 +304,13 @@ class HypothesisEvaluator:
         }
         onsets = {
             service: min(
-                (pattern.onset_time for pattern in service_patterns.values() if pattern.onset_time),
+                (
+                    pattern.onset_time
+                    for pattern in service_patterns.values()
+                    if pattern.direction
+                    in {MetricPatternDirection.HIGH, MetricPatternDirection.LOW}
+                    and pattern.onset_time is not None
+                ),
                 default=None,
             )
             for service, service_patterns in patterns.items()
@@ -369,6 +378,12 @@ class HypothesisEvaluator:
             else:
                 direction = MetricPatternDirection.NORMAL
             ratio = incident_median / summary.median if summary.median != 0 else None
+            onset_time = (
+                self._metric_onset(events, summary)
+                if direction
+                in {MetricPatternDirection.HIGH, MetricPatternDirection.LOW}
+                else None
+            )
             patterns[metric_name] = MetricPattern(
                 service,
                 metric_name,
@@ -377,7 +392,7 @@ class HypothesisEvaluator:
                 incident_median,
                 modified_z,
                 ratio,
-                self._metric_onset(events, summary),
+                onset_time,
             )
         return patterns
 
@@ -521,6 +536,35 @@ class HypothesisEvaluator:
             }
             for item in evidence
         )
+        earliest_service_semantic_time = min(
+            (
+                item.event_timestamp
+                for item in logs
+                if item.service == hypothesis.service
+                and item.semantic_category is not None
+            ),
+            default=None,
+        )
+        direct_log_time = min(
+            (
+                item.event_timestamp
+                for item in evidence
+                if item.status is EvidenceStatus.SUPPORT
+                and item.service == hypothesis.service
+                and item.category is EvidenceCategory.LOG_SEMANTIC
+                and item.event_timestamp is not None
+            ),
+            default=None,
+        )
+        direct_log_delay_seconds = (
+            max(
+                0.0,
+                (direct_log_time - earliest_service_semantic_time).total_seconds(),
+            )
+            if direct_log_time is not None
+            and earliest_service_semantic_time is not None
+            else float("inf")
+        )
         ranking = RankingComponents(
             contradictions,
             len(unexplained),
@@ -528,6 +572,7 @@ class HypothesisEvaluator:
             len(supporting_categories),
             len(direct_categories),
             direct_observations,
+            direct_log_delay_seconds,
         )
         return HypothesisEvaluation(
             hypothesis,
@@ -609,20 +654,11 @@ class HypothesisEvaluator:
         signature: FailureSignature,
         logs: Sequence[LogEvidence],
     ) -> list[CausalEvidence]:
-        service_logs = [
-            item
-            for item in logs
-            if item.service == hypothesis.service and item.semantic_category is not None
-        ]
-        earliest_time = min(
-            (item.event_timestamp for item in service_logs), default=None
-        )
         matching = [
             item
-            for item in service_logs
-            if item.semantic_category in signature.log_categories
-            and earliest_time is not None
-            and item.event_timestamp <= earliest_time + self.config.temporal_tolerance
+            for item in logs
+            if item.service == hypothesis.service
+            and item.semantic_category in signature.log_categories
         ]
         if not matching:
             return [
@@ -635,7 +671,20 @@ class HypothesisEvaluator:
                     f"No queried {hypothesis.service} log matches {hypothesis.failure_mode}.",
                 )
             ]
-        best = max(matching, key=lambda item: (item.similarity_score, item.message))
+        earliest_time = min(item.event_timestamp for item in matching)
+        relevant = [
+            item
+            for item in matching
+            if item.event_timestamp <= earliest_time + self.config.temporal_tolerance
+        ]
+        best = min(
+            relevant,
+            key=lambda item: (
+                -item.similarity_score,
+                item.event_timestamp,
+                item.message,
+            ),
+        )
         return [
             CausalEvidence(
                 EvidenceCategory.LOG_SEMANTIC,
@@ -645,6 +694,7 @@ class HypothesisEvaluator:
                 EvidenceStatus.SUPPORT,
                 f"{hypothesis.service} log evidence matches {best.semantic_category} "
                 f"with similarity {best.similarity_score:.3f}.",
+                best.event_timestamp,
             )
         ]
 

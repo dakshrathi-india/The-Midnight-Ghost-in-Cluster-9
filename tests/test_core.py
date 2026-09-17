@@ -145,6 +145,79 @@ def test_budget_exceeded_raises_specific_error_without_recording_query() -> None
     assert api.query_history == ()
 
 
+def test_trace_query_returns_complete_available_cross_service_tree() -> None:
+    spans = [
+        SpanEvent(
+            "trace-tree",
+            "front-span",
+            None,
+            "front",
+            "front.request",
+            NOW - timedelta(seconds=1),
+            NOW,
+            100,
+            "OK",
+        ),
+        SpanEvent(
+            "trace-tree",
+            "worker-span",
+            "front-span",
+            "worker",
+            "worker.request",
+            NOW,
+            NOW,
+            80,
+            "OK",
+        ),
+        SpanEvent(
+            "trace-tree",
+            "datastore-span",
+            "worker-span",
+            "datastore",
+            "datastore.query",
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(seconds=1),
+            70,
+            "OK",
+        ),
+        SpanEvent(
+            "unrelated-trace",
+            "other-span",
+            None,
+            "other",
+            "other.request",
+            NOW,
+            NOW,
+            5,
+            "OK",
+        ),
+    ]
+    api = TelemetryQueryAPI(TelemetryStore((), (), spans), total_budget=1)
+
+    result = api.query_traces("worker", NOW, NOW)
+
+    assert [(span.service, span.span_id) for span in result] == [
+        ("front", "front-span"),
+        ("worker", "worker-span"),
+        ("datastore", "datastore-span"),
+    ]
+
+
+def test_repeated_complete_trace_query_is_cached_at_zero_cost() -> None:
+    end = NOW + timedelta(minutes=1)
+    api = TelemetryQueryAPI(
+        _store(), total_budget=3, costs=QueryCosts(traces=3)
+    )
+
+    first = api.query_traces("api", NOW, end)
+    second = api.query_traces("api", NOW, end)
+
+    assert first is second
+    assert api.spent_budget == 3
+    assert [entry.cost for entry in api.query_history] == [3, 0]
+    assert api.query_history[1].served_from_cache
+
+
 def test_service_summary_has_one_configured_cost() -> None:
     api = TelemetryQueryAPI(
         _store(), total_budget=4, costs=QueryCosts(service_summary=4)

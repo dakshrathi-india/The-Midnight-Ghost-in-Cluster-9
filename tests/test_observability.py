@@ -116,11 +116,17 @@ def _analyze_incident(incident: Incident) -> dict[str, ServiceCandidate]:
         )
         for service in services
     }
-    spans = tuple(
-        span
+    spans_by_identity = {
+        (span.trace_id, span.span_id): span
         for service in services
         for span in api.query_traces(
             service, analysis_start, incident.observed_end_time
+        )
+    }
+    spans = tuple(
+        sorted(
+            spans_by_identity.values(),
+            key=lambda span: (span.trace_id, span.start_timestamp, span.span_id),
         )
     )
     logs = tuple(

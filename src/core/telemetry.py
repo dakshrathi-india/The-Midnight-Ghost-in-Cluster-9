@@ -61,7 +61,25 @@ class TelemetryStore:
     def spans_between(
         self, service: str, start_time: datetime, end_time: datetime
     ) -> tuple[SpanEvent, ...]:
-        return self._filter(self._spans, service, start_time, end_time, "start_timestamp")
+        """Return complete available traces seeded by a service in the time window."""
+        start, end = as_utc(start_time), as_utc(end_time)
+        if end < start:
+            raise ValueError("end_time must be at or after start_time")
+        trace_ids = {
+            span.trace_id
+            for span in self._spans
+            if span.service == service and start <= span.start_timestamp <= end
+        }
+        return tuple(
+            sorted(
+                (span for span in self._spans if span.trace_id in trace_ids),
+                key=lambda span: (
+                    span.trace_id,
+                    span.start_timestamp,
+                    span.span_id,
+                ),
+            )
+        )
 
     @staticmethod
     def _filter(
@@ -151,6 +169,7 @@ class TelemetryQueryAPI:
     def query_traces(
         self, service: str, start_time: datetime, end_time: datetime
     ) -> tuple[SpanEvent, ...]:
+        """Return full available trees for traces containing the service in the window."""
         return self._query("traces", service, start_time, end_time)
 
     def query_service_summary(
@@ -202,7 +221,11 @@ class TelemetryQueryAPI:
     def _summarize(self, service: str, start: datetime, end: datetime) -> ServiceSummary:
         metrics = self.__store.metrics_between(service, start, end)
         logs = self.__store.logs_between(service, start, end)
-        spans = self.__store.spans_between(service, start, end)
+        spans = tuple(
+            span
+            for span in self.__store.spans_between(service, start, end)
+            if span.service == service and start <= span.start_timestamp <= end
+        )
         by_name: dict[str, list[float]] = {}
         for metric in metrics:
             by_name.setdefault(metric.metric_name, []).append(metric.value)

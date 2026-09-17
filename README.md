@@ -11,7 +11,7 @@ This project implements a deterministic, budget-aware root-cause analysis (RCA) 
 - Reproducible metrics, logs, and recursively consistent parent/child trace intervals with configurable clock skew, missing or delayed observations, metric noise, and structurally unrelated decoy anomalies.
 - Historical robust metric summaries, immutable healthy metric history, and optional cached dependency edges in a separate `BaselineStore`.
 - Evaluation-only ground truth kept outside diagnosis-facing telemetry.
-- A controlled `TelemetryQueryAPI` with one global budget, configurable per-query costs, exact-query caching, and query history.
+- A controlled `TelemetryQueryAPI` with one global budget, configurable per-query costs, exact-query caching, query history, and service-seeded trace queries that return complete available trace trees.
 - Generic service dependency reconstruction and per-service failure/latency evidence from parent-child spans.
 - Independent MAD, CUSUM, and unsupervised multivariate Isolation Forest anomaly signals with raw evidence. Isolation Forest uses an explicit portable core feature policy with opt-in optional features such as queue length.
 - Lazy sentence-transformer log semantics using `sentence-transformers/all-MiniLM-L6-v2`, multiple prototypes per category, explicit UNKNOWN abstention, and an explicit TF-IDF offline/failure fallback.

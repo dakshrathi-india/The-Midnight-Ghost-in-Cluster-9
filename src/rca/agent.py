@@ -264,7 +264,21 @@ class DiagnosisAgent:
             for service in services
         }
         logs = tuple(event for values in logs_by_service.values() for event in values)
-        spans = tuple(event for values in spans_by_service.values() for event in values)
+        spans_by_identity = {
+            (span.trace_id, span.span_id): span
+            for values in spans_by_service.values()
+            for span in values
+        }
+        spans = tuple(
+            sorted(
+                spans_by_identity.values(),
+                key=lambda span: (
+                    span.trace_id,
+                    span.start_timestamp,
+                    span.span_id,
+                ),
+            )
+        )
         log_evidence = self._log_extractor.extract(logs)
         trace_graph = self._trace_analyzer.reconstruct(spans, baseline)
         candidates = self._candidate_generator.generate(

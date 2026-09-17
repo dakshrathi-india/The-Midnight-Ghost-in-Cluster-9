@@ -73,15 +73,11 @@ def test_trace_parent_child_relationships_are_valid() -> None:
         9, FaultRequest("payment", "deployment_regression")
     )
     api = TelemetryQueryAPI(incident.telemetry, 20)
-    spans = []
-    for service in incident.baseline.known_services:
-        spans.extend(
-            api.query_traces(
-                service,
-                incident.observed_start_time - timedelta(seconds=1),
-                incident.observed_end_time + timedelta(seconds=1),
-            )
-        )
+    spans = api.query_traces(
+        "gateway",
+        incident.observed_start_time - timedelta(seconds=1),
+        incident.observed_end_time + timedelta(seconds=1),
+    )
     by_trace: dict[str, list] = {}
     for span in spans:
         by_trace.setdefault(span.trace_id, []).append(span)
