@@ -7,7 +7,7 @@ from .config import (
     SimulationConfig,
     benchmark_config,
 )
-from .generator import GroundTruth, Incident, IncidentGenerator
+from .generator import GroundTruth, Incident, IncidentGenerator, SimulationIncidentSession
 from .remediation import SimulatorRemediationExecutor
 
 __all__ = [
@@ -18,6 +18,7 @@ __all__ = [
     "IncidentGenerator",
     "ServiceConfig",
     "SimulationConfig",
+    "SimulationIncidentSession",
     "SimulatorRemediationExecutor",
     "benchmark_config",
 ]

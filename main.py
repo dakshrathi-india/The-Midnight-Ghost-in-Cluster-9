@@ -1,82 +1,66 @@
-"""Run the deterministic budget-aware diagnosis demonstration."""
+"""Run the deterministic diagnosis, remediation, and recovery demonstration."""
 
 from __future__ import annotations
 
 from datetime import timedelta
 
-from src.core import QueryCosts, TelemetryQueryAPI
-from src.rca import CandidateStrength, DiagnosisAgent
-from src.simulation import FaultRequest, IncidentGenerator, benchmark_config
+from src.remediation import RecoveryController
+from src.simulation import (
+    FaultRequest,
+    IncidentGenerator,
+    SimulatorRemediationExecutor,
+    benchmark_config,
+)
 
 
 def main() -> None:
-    incident = IncidentGenerator(benchmark_config()).generate(
+    session = IncidentGenerator(benchmark_config()).start_session(
         seed=17,
         fault=FaultRequest(service="postgres", failure_mode="database_slowdown"),
     )
+    incident = session.initial_incident
     analysis_start = max(
         event.event_timestamp for event in incident.baseline.metric_history
     ) + timedelta(microseconds=1)
-    api = TelemetryQueryAPI(
-        incident.telemetry,
-        total_budget=17,
-        costs=QueryCosts(metrics=1, logs=1, traces=1),
-    )
-
-    result = DiagnosisAgent().diagnose(
+    api = session.create_query_api(total_budget=17)
+    result = RecoveryController().run(
         api,
         incident.baseline,
         analysis_start,
         incident.observed_end_time,
+        SimulatorRemediationExecutor(session.simulator),
+        session,
     )
-
-    candidates = [
-        candidate
-        for candidate in result.candidates
-        if candidate.strength is not CandidateStrength.NOT_CANDIDATE
-    ]
     print(f"Incident: {incident.incident_id}")
-    print(
-        "Candidates: "
-        + ", ".join(
-            f"{candidate.service}:{candidate.strength.value}"
-            for candidate in candidates
-        )
+    hypothesis = result.diagnosis.best_hypothesis
+    pair = (
+        f"({hypothesis.service}, {hypothesis.failure_mode})"
+        if hypothesis is not None
+        else "none"
     )
     print(
-        "Query sequence: "
-        + " -> ".join(
-            f"{entry.query_type}({entry.service})[{entry.cost}]"
-            for entry in result.queries_executed
-        )
+        f"Diagnosis: {result.diagnosis.status.value} {pair}; "
+        f"budget={result.diagnosis.budget_spent}/{api.total_budget}"
     )
+    action = result.planning.action
+    print(f"Planned action: {action.action_type.value if action else 'none'}")
     print(
-        f"Diagnosis status: {result.status.value}; "
-        f"budget={result.budget_spent}/{api.total_budget}"
+        "Execution: "
+        + (result.execution.status.value if result.execution is not None else "not run")
     )
-    if result.ranked_hypotheses:
-        best = result.ranked_hypotheses[0]
-        hypothesis = best.hypothesis
-        print(f"Best hypothesis: ({hypothesis.service}, {hypothesis.failure_mode})")
+    if result.verification is not None:
         print(
-            "Supporting evidence: "
-            + "; ".join(
-                f"{item.category.value}:{item.observation}"
-                for item in best.supporting_evidence
-            )
+            "Verification services: "
+            + ", ".join(result.verification.checked_services)
         )
-        print(
-            "Contradictions: "
-            + (
-                "; ".join(item.explanation for item in best.contradictions)
-                if best.contradictions
-                else "none"
-            )
-        )
+        print(f"Recovery verification: {result.verification.status.value}")
+    else:
+        print("Recovery verification: not run")
+    print(f"Total global budget: {api.spent_budget}/{api.total_budget}")
 
     truth = incident.ground_truth
     print(
-        "Evaluation-only ground truth: "
+        "EVALUATION-ONLY ground truth: "
         f"({truth.root_service}, {truth.failure_mode}); "
         f"decoys={list(truth.decoy_services)}"
     )

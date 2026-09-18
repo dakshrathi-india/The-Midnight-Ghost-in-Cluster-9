@@ -298,3 +298,26 @@ def test_ground_truth_is_not_reachable_through_query_api() -> None:
 
     assert not hasattr(api, "ground_truth")
     assert not hasattr(incident.telemetry, "ground_truth")
+
+
+def test_start_session_preserves_generate_output_and_appends_real_future_telemetry() -> None:
+    generator = IncidentGenerator(benchmark_config(NO_FRAGMENTATION))
+    fault = FaultRequest("postgres", "database_slowdown")
+    generated = generator.generate(13, fault)
+    session = generator.start_session(13, fault)
+    initial = session.initial_incident
+
+    assert generated.ground_truth == initial.ground_truth
+    assert _query_all_metrics(generated, "postgres") == _query_all_metrics(
+        initial, "postgres"
+    )
+
+    initial_count = session.telemetry.metric_count
+    api = session.create_query_api(total_budget=2)
+    window = session.advance(api, 3)
+    fresh = api.query_metrics("postgres", window.start_time, window.end_time)
+
+    assert window.step_count == 3
+    assert session.telemetry.metric_count > initial_count
+    assert len([event for event in fresh if event.metric_name == "request_rate"]) == 3
+    assert api.spent_budget == 1

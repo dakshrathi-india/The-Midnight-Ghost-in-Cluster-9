@@ -89,6 +89,7 @@ class DiagnosisAgent:
         baseline: BaselineStore,
         start_time: datetime,
         end_time: datetime,
+        intervention_contradictions: Mapping[tuple[str, str], str] | None = None,
     ) -> DiagnosisResult:
         history_start = len(api.query_history)
         services = tuple(sorted(baseline.known_services))
@@ -125,6 +126,7 @@ class DiagnosisAgent:
             logs_by_service,
             spans_by_service,
             baseline,
+            intervention_contradictions,
         )
         if len(observed_services) < len(services):
             return self._result(
@@ -206,6 +208,7 @@ class DiagnosisAgent:
                 logs_by_service,
                 spans_by_service,
                 baseline,
+                intervention_contradictions,
             )
             ranked = rank_evaluations(evaluations)
 
@@ -248,6 +251,7 @@ class DiagnosisAgent:
         logs_by_service: Mapping[str, Sequence[LogEvent]],
         spans_by_service: Mapping[str, Sequence[SpanEvent]],
         baseline: BaselineStore,
+        intervention_contradictions: Mapping[tuple[str, str], str] | None = None,
     ) -> tuple[tuple[ServiceCandidate, ...], tuple[HypothesisEvaluation, ...]]:
         mad = {
             service: self._mad.analyze(service, metrics_by_service[service], baseline)
@@ -302,6 +306,7 @@ class DiagnosisAgent:
             spans,
             edges,
             baseline,
+            intervention_contradictions,
         )
         return candidates, evaluations
 

@@ -7,6 +7,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Protocol
 
+from src.core.telemetry import TelemetryQueryAPI
+
 
 class RemediationActionType(str, Enum):
     SCALE_UP = "SCALE_UP"
@@ -61,8 +63,27 @@ class ExecutionReceipt:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class FreshObservationWindow:
+    start_time: datetime
+    end_time: datetime
+    step_count: int
+
+    def __post_init__(self) -> None:
+        if self.end_time < self.start_time:
+            raise ValueError("observation window end must not precede its start")
+        if self.step_count < 1:
+            raise ValueError("observation window must contain at least one step")
+
+
 class RemediationExecutor(Protocol):
     def execute(self, action: RemediationAction) -> ExecutionReceipt: ...
+
+
+class PostActionObserver(Protocol):
+    def observe(
+        self, api: TelemetryQueryAPI, step_count: int
+    ) -> FreshObservationWindow: ...
 
 
 def execute_if_planned(

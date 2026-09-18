@@ -228,3 +228,84 @@ def test_service_summary_has_one_configured_cost() -> None:
     assert summary.log_count == 1
     assert summary.span_count == 1
     assert api.remaining_budget == 0
+
+
+def test_ingest_future_telemetry_preserves_non_overlapping_cache_and_budget_history() -> None:
+    api = TelemetryQueryAPI(_store(), total_budget=3)
+    end = NOW + timedelta(seconds=5)
+    first = api.query_metrics("api", NOW, end)
+
+    api.ingest(
+        metrics=[
+            MetricEvent(
+                NOW + timedelta(minutes=1),
+                NOW + timedelta(minutes=1),
+                "api",
+                "request_rate",
+                14,
+                "requests/s",
+            )
+        ]
+    )
+    second = api.query_metrics("api", NOW, end)
+
+    assert second is first
+    assert api.spent_budget == 1
+    assert [entry.cost for entry in api.query_history] == [1, 0]
+    assert api.query_history[-1].served_from_cache
+
+
+def test_ingest_inside_cached_window_invalidates_only_affected_result() -> None:
+    api = TelemetryQueryAPI(_store(), total_budget=4)
+    end = NOW + timedelta(minutes=1)
+    original_metrics = api.query_metrics("api", NOW, end)
+    original_logs = api.query_logs("api", NOW, end)
+    appended = MetricEvent(
+        NOW + timedelta(seconds=30),
+        NOW + timedelta(seconds=31),
+        "api",
+        "request_rate",
+        15,
+        "requests/s",
+    )
+
+    api.ingest(metrics=[appended])
+    refreshed_metrics = api.query_metrics("api", NOW, end)
+    cached_logs = api.query_logs("api", NOW, end)
+
+    assert original_metrics != refreshed_metrics
+    assert appended in refreshed_metrics
+    assert cached_logs is original_logs
+    assert [entry.cost for entry in api.query_history] == [1, 1, 1, 0]
+    assert api.spent_budget == 3
+
+
+def test_ingest_logs_and_trace_members_invalidates_their_affected_queries() -> None:
+    api = TelemetryQueryAPI(_store(), total_budget=6)
+    end = NOW + timedelta(minutes=1)
+    api.query_logs("api", NOW, end)
+    api.query_traces("api", NOW, end)
+    new_log = LogEvent(
+        NOW + timedelta(seconds=1),
+        NOW + timedelta(seconds=2),
+        "api",
+        "WARNING",
+        "warming",
+    )
+    new_span = SpanEvent(
+        "t1",
+        "s2",
+        "s1",
+        "database",
+        "query",
+        NOW + timedelta(seconds=2),
+        NOW + timedelta(seconds=3),
+        2,
+        "OK",
+    )
+
+    api.ingest(logs=[new_log], spans=[new_span])
+
+    assert new_log in api.query_logs("api", NOW, end)
+    assert new_span in api.query_traces("api", NOW, end)
+    assert [entry.cost for entry in api.query_history] == [1, 1, 1, 1]

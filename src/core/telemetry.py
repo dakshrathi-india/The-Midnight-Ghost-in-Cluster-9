@@ -48,6 +48,23 @@ class TelemetryStore:
     def span_count(self) -> int:
         return len(self._spans)
 
+    def _extend(
+        self,
+        metrics: tuple[MetricEvent, ...] | list[MetricEvent] = (),
+        logs: tuple[LogEvent, ...] | list[LogEvent] = (),
+        spans: tuple[SpanEvent, ...] | list[SpanEvent] = (),
+    ) -> None:
+        """Append a normalized telemetry batch while preserving event-time ordering."""
+        self._metrics = tuple(
+            sorted((*self._metrics, *metrics), key=lambda event: event.event_timestamp)
+        )
+        self._logs = tuple(
+            sorted((*self._logs, *logs), key=lambda event: event.event_timestamp)
+        )
+        self._spans = tuple(
+            sorted((*self._spans, *spans), key=lambda event: event.start_timestamp)
+        )
+
     def metrics_between(
         self, service: str, start_time: datetime, end_time: datetime
     ) -> tuple[MetricEvent, ...]:
@@ -130,6 +147,23 @@ class TelemetryQueryAPI:
     @property
     def query_history(self) -> tuple[QueryHistoryEntry, ...]:
         return tuple(self._history)
+
+    def ingest(
+        self,
+        metrics: tuple[MetricEvent, ...] | list[MetricEvent] = (),
+        logs: tuple[LogEvent, ...] | list[LogEvent] = (),
+        spans: tuple[SpanEvent, ...] | list[SpanEvent] = (),
+    ) -> None:
+        """Append canonical telemetry and invalidate only changed cached results."""
+        if not metrics and not logs and not spans:
+            return
+        self.__store._extend(metrics, logs, spans)
+        for cache_key, cached_result in tuple(self._cache.items()):
+            query_type, service, start, end = cache_key
+            if self._cached_result_changed(
+                query_type, service, start, end, cached_result
+            ):
+                del self._cache[cache_key]
 
     def query_cost(
         self,
@@ -237,6 +271,24 @@ class TelemetryQueryAPI:
             span_count=len(spans),
             failed_span_count=sum(span.status == "ERROR" for span in spans),
         )
+
+    def _cached_result_changed(
+        self,
+        query_type: str,
+        service: str,
+        start: datetime,
+        end: datetime,
+        cached_result: object,
+    ) -> bool:
+        if query_type == "metrics":
+            return self.__store.metrics_between(service, start, end) != cached_result
+        if query_type == "logs":
+            return self.__store.logs_between(service, start, end) != cached_result
+        if query_type == "traces":
+            return self.__store.spans_between(service, start, end) != cached_result
+        if query_type == "service_summary":
+            return self._summarize(service, start, end) != cached_result
+        raise ValueError(f"unknown cached query type: {query_type}")
 
     def _record(
         self,

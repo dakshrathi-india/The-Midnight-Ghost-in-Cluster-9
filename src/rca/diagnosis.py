@@ -35,6 +35,7 @@ class EvidenceCategory(str, Enum):
     TEMPORAL_PRECEDENCE = "TEMPORAL_PRECEDENCE"
     GRAPH_PROPAGATION = "GRAPH_PROPAGATION"
     CANDIDATE_STRENGTH = "CANDIDATE_STRENGTH"
+    INTERVENTION_OUTCOME = "INTERVENTION_OUTCOME"
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +294,7 @@ class HypothesisEvaluator:
         spans: Sequence[SpanEvent],
         dependency_edges: set[tuple[str, str]] | frozenset[tuple[str, str]],
         baseline: BaselineStore,
+        intervention_contradictions: Mapping[tuple[str, str], str] | None = None,
     ) -> tuple[HypothesisEvaluation, ...]:
         patterns = {
             service: self.metric_patterns(service, events, baseline)
@@ -328,6 +330,7 @@ class HypothesisEvaluator:
                 localizations[hypothesis.service],
                 dependency_edges,
                 trace_dependency_edges,
+                intervention_contradictions or {},
             )
             for hypothesis in hypotheses
         )
@@ -435,9 +438,24 @@ class HypothesisEvaluator:
         localization: TraceLocalization,
         dependency_edges: set[tuple[str, str]] | frozenset[tuple[str, str]],
         trace_dependency_edges: set[tuple[str, str]],
+        intervention_contradictions: Mapping[tuple[str, str], str],
     ) -> HypothesisEvaluation:
         signature = self.signatures.get(hypothesis.failure_mode)
         evidence: list[CausalEvidence] = [self._candidate_evidence(hypothesis)]
+        intervention_reason = intervention_contradictions.get(
+            (hypothesis.service, hypothesis.failure_mode)
+        )
+        if intervention_reason is not None:
+            evidence.append(
+                CausalEvidence(
+                    EvidenceCategory.INTERVENTION_OUTCOME,
+                    hypothesis.service,
+                    hypothesis.failure_mode,
+                    "applied intervention did not resolve the incident",
+                    EvidenceStatus.CONTRADICTION,
+                    intervention_reason,
+                )
+            )
         evidence.extend(self._metric_evidence(hypothesis, signature, patterns))
         evidence.extend(
             self._log_evidence(

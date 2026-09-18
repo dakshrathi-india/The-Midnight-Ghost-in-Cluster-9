@@ -9,9 +9,11 @@ from types import MappingProxyType
 from typing import Mapping
 
 from src.core.baseline import BaselineStore
+from src.core.budget import QueryCosts
 from src.core.models import LogEvent, MetricEvent, SpanEvent
 from src.core.normalization import TelemetryNormalizer
-from src.core.telemetry import TelemetryStore
+from src.core.telemetry import TelemetryQueryAPI, TelemetryStore
+from src.remediation.domain import FreshObservationWindow
 
 from .config import FaultRequest, SimulationConfig
 from .faults import resolve_parameters
@@ -53,6 +55,11 @@ class IncidentGenerator:
         self.config = config
 
     def generate(self, seed: int, fault: FaultRequest | None = None) -> Incident:
+        return self.start_session(seed, fault).initial_incident
+
+    def start_session(
+        self, seed: int, fault: FaultRequest | None = None
+    ) -> "SimulationIncidentSession":
         rng = random.Random(seed)
         root_service, failure_mode, parameters = self._resolve_fault(rng, fault or FaultRequest())
         start_time = datetime(2025, 1, 1, tzinfo=timezone.utc) + timedelta(days=seed % 365)
@@ -80,7 +87,9 @@ class IncidentGenerator:
         )
         offsets = self._clock_offsets(rng)
         decoys = self._select_decoys(rng, root_service)
-        fragmented = self._apply_imperfections(raw, rng, offsets, decoys, start_time, fault_step)
+        fragmented = _apply_imperfections(
+            self.config, raw, rng, offsets, decoys, fault_time
+        )
         metrics = normalizer.normalize_metrics(fragmented.metrics)
         logs = normalizer.normalize_logs(fragmented.logs)
         spans = normalizer.normalize_spans(fragmented.spans)
@@ -112,13 +121,26 @@ class IncidentGenerator:
             seconds=(self.config.baseline_steps + self.config.incident_steps - 1)
             * self.config.step_seconds
         )
-        return Incident(
+        incident = Incident(
             incident_id,
             store,
             baseline,
             ground_truth,
             min(all_times, default=start_time),
             max(all_times, default=expected_end),
+        )
+        return SimulationIncidentSession(
+            self.config,
+            simulator,
+            rng,
+            offsets,
+            decoys,
+            normalizer,
+            store,
+            baseline,
+            ground_truth,
+            incident,
+            fault_time,
         )
 
     def _resolve_fault(
@@ -150,80 +172,6 @@ class IncidentGenerator:
         )
         return (rng.choice(candidates),) if candidates else ()
 
-    def _apply_imperfections(
-        self,
-        raw: SimulationOutput,
-        rng: random.Random,
-        offsets: dict[str, float],
-        decoys: tuple[str, ...],
-        start_time: datetime,
-        fault_step: int,
-    ) -> SimulationOutput:
-        cfg = self.config.fragmentation
-        fault_time = start_time + timedelta(seconds=fault_step * self.config.step_seconds)
-
-        metrics: list[MetricEvent] = []
-        for event in raw.metrics:
-            if rng.random() < cfg.missing_observation_probability:
-                continue
-            value = event.value
-            if value and cfg.metric_noise_fraction:
-                value *= 1.0 + rng.uniform(-cfg.metric_noise_fraction, cfg.metric_noise_fraction)
-            if event.service in decoys and event.event_timestamp >= fault_time:
-                if event.metric_name == "cpu_utilization":
-                    value = min(1.0, value + 0.38)
-                elif event.metric_name == "request_latency_ms":
-                    value *= 1.75
-            metrics.append(
-                replace(
-                    event,
-                    event_timestamp=event.event_timestamp
-                    + timedelta(seconds=offsets[event.service]),
-                    arrival_timestamp=self._arrival_time(event.arrival_timestamp, rng),
-                    value=value,
-                )
-            )
-
-        logs = [
-            replace(
-                event,
-                event_timestamp=event.event_timestamp
-                + timedelta(seconds=offsets[event.service]),
-                arrival_timestamp=self._arrival_time(event.arrival_timestamp, rng),
-            )
-            for event in raw.logs
-            if rng.random() >= cfg.missing_observation_probability
-        ]
-
-        spans: list[SpanEvent] = []
-        by_trace: dict[str, list[SpanEvent]] = {}
-        for span in raw.spans:
-            by_trace.setdefault(span.trace_id, []).append(span)
-        for trace in by_trace.values():
-            if rng.random() < cfg.missing_observation_probability:
-                continue
-            spans.extend(
-                replace(
-                    span,
-                    start_timestamp=span.start_timestamp
-                    + timedelta(seconds=offsets[span.service]),
-                    arrival_timestamp=self._arrival_time(span.arrival_timestamp, rng),
-                )
-                for span in trace
-            )
-        return SimulationOutput(tuple(metrics), tuple(logs), tuple(spans), raw.state_history)
-
-    def _arrival_time(
-        self,
-        event_time: datetime,
-        rng: random.Random,
-    ) -> datetime:
-        delay = 0.0
-        cfg = self.config.fragmentation
-        if rng.random() < cfg.delayed_observation_probability:
-            delay = rng.uniform(0.001, cfg.max_delay_seconds)
-        return event_time + timedelta(seconds=delay)
-
     def _affected_services(self, root_service: str) -> frozenset[str]:
         reverse: dict[str, set[str]] = {name: set() for name in self.config.service_map}
         for caller, dependency in self.config.dependency_edges:
@@ -237,3 +185,151 @@ class IncidentGenerator:
                     affected.add(upstream)
                     pending.append(upstream)
         return frozenset(affected)
+
+
+class SimulationIncidentSession:
+    """Stateful incident stream with one simulator and fragmentation pipeline."""
+
+    def __init__(
+        self,
+        config: SimulationConfig,
+        simulator: MicroserviceSimulator,
+        fragmentation_rng: random.Random,
+        clock_offsets: dict[str, float],
+        decoy_services: tuple[str, ...],
+        normalizer: TelemetryNormalizer,
+        telemetry: TelemetryStore,
+        baseline: BaselineStore,
+        ground_truth: GroundTruth,
+        initial_incident: Incident,
+        fault_time: datetime,
+    ) -> None:
+        self.config = config
+        self.simulator = simulator
+        self._fragmentation_rng = fragmentation_rng
+        self._clock_offsets = dict(clock_offsets)
+        self._decoy_services = tuple(decoy_services)
+        self._normalizer = normalizer
+        self.telemetry = telemetry
+        self.baseline = baseline
+        self.ground_truth = ground_truth
+        self.initial_incident = initial_incident
+        self._fault_time = fault_time
+        self._current_observation_time = initial_incident.observed_end_time
+
+    @property
+    def current_observation_time(self) -> datetime:
+        return self._current_observation_time
+
+    def create_query_api(
+        self, total_budget: int, costs: QueryCosts | None = None
+    ) -> TelemetryQueryAPI:
+        return TelemetryQueryAPI(self.telemetry, total_budget, costs)
+
+    def observe(
+        self, api: TelemetryQueryAPI, step_count: int
+    ) -> FreshObservationWindow:
+        return self.advance(api, step_count)
+
+    def advance(
+        self, api: TelemetryQueryAPI, step_count: int
+    ) -> FreshObservationWindow:
+        if step_count < 1:
+            raise ValueError("step_count must be positive")
+        raw = self.simulator.continue_run(step_count)
+        fragmented = _apply_imperfections(
+            self.config,
+            raw,
+            self._fragmentation_rng,
+            self._clock_offsets,
+            self._decoy_services,
+            self._fault_time,
+        )
+        metrics = self._normalizer.normalize_metrics(fragmented.metrics)
+        logs = self._normalizer.normalize_logs(fragmented.logs)
+        spans = self._normalizer.normalize_spans(fragmented.spans)
+        api.ingest(metrics, logs, spans)
+        event_times = (
+            [event.event_timestamp for event in metrics]
+            + [event.event_timestamp for event in logs]
+            + [event.start_timestamp for event in spans]
+        )
+        if not event_times:
+            assert self.simulator.last_step_time is not None
+            event_times = [self.simulator.last_step_time]
+        window = FreshObservationWindow(min(event_times), max(event_times), step_count)
+        self._current_observation_time = window.end_time
+        return window
+
+
+def _apply_imperfections(
+    config: SimulationConfig,
+    raw: SimulationOutput,
+    rng: random.Random,
+    offsets: Mapping[str, float],
+    decoys: tuple[str, ...],
+    fault_time: datetime,
+) -> SimulationOutput:
+    cfg = config.fragmentation
+    metrics: list[MetricEvent] = []
+    for event in raw.metrics:
+        if rng.random() < cfg.missing_observation_probability:
+            continue
+        value = event.value
+        if value and cfg.metric_noise_fraction:
+            value *= 1.0 + rng.uniform(-cfg.metric_noise_fraction, cfg.metric_noise_fraction)
+        if event.service in decoys and event.event_timestamp >= fault_time:
+            if event.metric_name == "cpu_utilization":
+                value = min(1.0, value + 0.38)
+            elif event.metric_name == "request_latency_ms":
+                value *= 1.75
+        metrics.append(
+            replace(
+                event,
+                event_timestamp=event.event_timestamp
+                + timedelta(seconds=offsets[event.service]),
+                arrival_timestamp=_arrival_time(config, event.arrival_timestamp, rng),
+                value=value,
+            )
+        )
+
+    logs = [
+        replace(
+            event,
+            event_timestamp=event.event_timestamp
+            + timedelta(seconds=offsets[event.service]),
+            arrival_timestamp=_arrival_time(config, event.arrival_timestamp, rng),
+        )
+        for event in raw.logs
+        if rng.random() >= cfg.missing_observation_probability
+    ]
+
+    spans: list[SpanEvent] = []
+    by_trace: dict[str, list[SpanEvent]] = {}
+    for span in raw.spans:
+        by_trace.setdefault(span.trace_id, []).append(span)
+    for trace in by_trace.values():
+        if rng.random() < cfg.missing_observation_probability:
+            continue
+        spans.extend(
+            replace(
+                span,
+                start_timestamp=span.start_timestamp
+                + timedelta(seconds=offsets[span.service]),
+                arrival_timestamp=_arrival_time(config, span.arrival_timestamp, rng),
+            )
+            for span in trace
+        )
+    return SimulationOutput(tuple(metrics), tuple(logs), tuple(spans), raw.state_history)
+
+
+def _arrival_time(
+    config: SimulationConfig,
+    event_time: datetime,
+    rng: random.Random,
+) -> datetime:
+    delay = 0.0
+    cfg = config.fragmentation
+    if rng.random() < cfg.delayed_observation_probability:
+        delay = rng.uniform(0.001, cfg.max_delay_seconds)
+    return event_time + timedelta(seconds=delay)

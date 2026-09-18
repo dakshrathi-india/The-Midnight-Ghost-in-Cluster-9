@@ -39,6 +39,8 @@ The remediation layer is separate from RCA and simulation. A declarative policy 
 
 The simulator implements that executor behind the generic boundary. Its original `run()` method and incremental continuation share one state-update path, preserving queues, prior service states, deterministic RNG state, and step numbering. A compatible action on the actual target clears the corresponding effect only for future steps. Wrong targets and incompatible actions can still be applied as commands but leave the hidden fault active, allowing later recovery verification to observe failure without exposing ground truth.
 
+The append-only telemetry boundary keeps the same store, query budget, history, and valid cache entries as a stateful incident session advances the same simulator. Fresh raw events pass through the original fragmentation RNG, clock offsets, decoy policy, normalizer, and selective cache invalidation. Recovery verification queries only fresh metric windows for the diagnosed root, causally explained strong services, and one eligible lexical healthy sentinel. It requires all required root signature metrics to normalize, no strong residual affected-region candidate, continuing traffic, and a healthy sentinel. Missing, transient, or unaffordable evidence stays inconclusive. A decisive failure after an applied action becomes an `INTERVENTION_OUTCOME` contradiction on only the attempted pair before generic investigation runs again.
+
 ## Isolation decisions
 
 Synthetic simulation is a benchmark backend, not the RCA algorithm. Simulator topology, internal state, true timing, fault injection, and service-specific validity rules live under `src/simulation`; the generic `src/core` layer can accept future OpenTelemetry-derived events without importing simulation code.
@@ -49,4 +51,4 @@ Budgeting represents the operational cost and latency of fetching evidence in re
 
 ## Planned, not implemented
 
-Later stages will add recovery verification and diagnose-act-verify retry control, OpenTelemetry ingestion, a user interface, and final benchmark reporting.
+Later stages will add OpenTelemetry ingestion, a user interface, and final benchmark reporting.

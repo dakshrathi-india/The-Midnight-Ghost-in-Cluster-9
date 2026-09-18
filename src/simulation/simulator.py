@@ -175,7 +175,12 @@ class MicroserviceSimulator:
             service = self._service_map[name]
             for dependency in service.dependencies:
                 previous_error = self._previous_states[dependency].error_rate
-                retry_multiplier = 1.0 + self.config.retry_factor * previous_error
+                scenario = self._fault_scenario
+                retry_multiplier = (
+                    1.0
+                    if scenario.mitigated
+                    else 1.0 + self.config.retry_factor * previous_error
+                )
                 arrivals[dependency] += arrivals[name] * retry_multiplier
 
         local: dict[str, ServiceState] = {}
