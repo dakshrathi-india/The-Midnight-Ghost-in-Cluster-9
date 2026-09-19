@@ -109,7 +109,10 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
     _compact_shell()
-    st.html('<div aria-hidden="true" style="height: 4rem;"></div>')
+
+    st.space("large")
+    st.space("large")
+
     st.session_state.setdefault("demo_execution", None)
     st.session_state.setdefault("editing_setup", False)
 
@@ -236,7 +239,7 @@ def _compact_shell() -> None:
         div[data-testid="stMainBlockContainer"] {
             width: calc(100% - 48px) !important;
             max-width: 1320px !important;
-            padding-top: 1rem !important;
+            padding-top: 0.5rem !important;
             padding-bottom: 2.5rem !important;
         }
         </style>
