@@ -114,9 +114,7 @@ def main() -> None:
 
     base_config = benchmark_config()
     options = service_failure_mode_options(base_config)
-    existing = cast(
-        DemoExecution | None, st.session_state.get("demo_execution")
-    )
+    existing = cast(DemoExecution | None, st.session_state.get("demo_execution"))
     section = _page_header(existing)
     seed, service, failure_mode, profile, budget, run_pressed = _setup_toolbar(
         options, existing
@@ -136,9 +134,7 @@ def main() -> None:
             st.session_state["editing_setup"] = False
             st.rerun()
 
-    execution = cast(
-        DemoExecution | None, st.session_state.get("demo_execution")
-    )
+    execution = cast(DemoExecution | None, st.session_state.get("demo_execution"))
     if execution is None:
         _landing_state(base_config)
         return
@@ -182,7 +178,9 @@ def _setup_toolbar(
     all_modes = tuple(sorted({mode for modes in options.values() for mode in modes}))
     profiles = tuple(RobustnessProfile)
     default_service = execution.requested_service if execution else "postgres"
-    default_mode = execution.requested_failure_mode if execution else "database_slowdown"
+    default_mode = (
+        execution.requested_failure_mode if execution else "database_slowdown"
+    )
     default_profile = execution.profile if execution else RobustnessProfile.DEFAULT
     default_seed = execution.seed if execution else 17
     default_budget = execution.api.total_budget if execution else 17
@@ -212,9 +210,7 @@ def _setup_toolbar(
                 format_func=lambda item: item.value,
             )
         with controls[3]:
-            seed = int(
-                st.number_input("Seed", min_value=0, value=default_seed, step=1)
-            )
+            seed = int(st.number_input("Seed", min_value=0, value=default_seed, step=1))
         with controls[4]:
             budget = int(
                 st.number_input(
@@ -233,18 +229,16 @@ def _setup_toolbar(
 
 
 def _compact_shell() -> None:
-    st.html(
-        """
+    st.html("""
         <style>
         div[data-testid="stMainBlockContainer"] {
             width: calc(100% - 48px);
             max-width: 1320px;
-            padding-top: 1.25rem;
+            padding-top: 4rem;
             padding-bottom: 2.5rem;
         }
         </style>
-        """
-    )
+        """)
 
 
 def _page_header(execution: DemoExecution | None) -> str:
@@ -301,9 +295,11 @@ def _overview(execution: DemoExecution) -> None:
     failure_mode = (
         diagnosed.failure_mode
         if diagnosed
-        else "Unknown / unsupported"
-        if diagnosis.status is DiagnosisStatus.UNSUPPORTED
-        else "No failure mode"
+        else (
+            "Unknown / unsupported"
+            if diagnosis.status is DiagnosisStatus.UNSUPPORTED
+            else "No failure mode"
+        )
     )
 
     st.space("small")
@@ -362,9 +358,7 @@ def _diagnosis_evidence(
     contradictions = tuple(
         item for item in evidence if item.status is EvidenceStatus.CONTRADICTION
     )
-    supports = tuple(
-        item for item in evidence if item.status is EvidenceStatus.SUPPORT
-    )
+    supports = tuple(item for item in evidence if item.status is EvidenceStatus.SUPPORT)
     support_limit = max(0, 3 - len(contradictions))
     return (*supports[:support_limit], *contradictions[:3])
 
@@ -420,15 +414,9 @@ def _telemetry_panel(execution: DemoExecution, root_service: str) -> None:
             _telemetry_chart(signal_rows, show_legend=index == 0)
 
 
-def _telemetry_chart(
-    rows: Sequence[dict[str, object]], *, show_legend: bool
-) -> None:
+def _telemetry_chart(rows: Sequence[dict[str, object]], *, show_legend: bool) -> None:
     frame = pd.DataFrame(rows)
-    legend = (
-        alt.Legend(orient="bottom", title=None, columns=3)
-        if show_legend
-        else None
-    )
+    legend = alt.Legend(orient="bottom", title=None, columns=3) if show_legend else None
     chart = (
         alt.Chart(frame)
         .mark_line(strokeWidth=1.8)
@@ -697,10 +685,12 @@ def _response_and_budget(execution: DemoExecution) -> None:
             (
                 f"{hypothesis.service} / {hypothesis.failure_mode}"
                 if hypothesis
-                else f"{localized_service} / Unknown / unsupported"
-                if run.diagnosis.status is DiagnosisStatus.UNSUPPORTED
-                and localized_service is not None
-                else "Not resolved"
+                else (
+                    f"{localized_service} / Unknown / unsupported"
+                    if run.diagnosis.status is DiagnosisStatus.UNSUPPORTED
+                    and localized_service is not None
+                    else "Not resolved"
+                )
             ),
         ),
         ("Safety gate →", "Passed" if action is not None else "Blocked"),
@@ -735,9 +725,7 @@ def _response_and_budget(execution: DemoExecution) -> None:
         st.progress(min(spent / total, 1.0))
         diagnosis_spent = run.diagnosis.budget_spent
         verification_spent = verification.budget_spent if verification else 0
-        st.caption(
-            f"Diagnosis {diagnosis_spent} · Verification {verification_spent}"
-        )
+        st.caption(f"Diagnosis {diagnosis_spent} · Verification {verification_spent}")
 
 
 def _evaluation(execution: DemoExecution) -> None:
