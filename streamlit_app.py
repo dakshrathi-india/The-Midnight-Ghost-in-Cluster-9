@@ -233,10 +233,19 @@ def _compact_shell() -> None:
     st.html(
         """
         <style>
+        header[data-testid="stHeader"] {
+            display: none !important;
+        }
+        div[data-testid="stToolbar"] {
+            display: none !important;
+        }
+        div[data-testid="stDecoration"] {
+            display: none !important;
+        }
         div[data-testid="stMainBlockContainer"] {
             width: calc(100% - 48px) !important;
             max-width: 1320px !important;
-            padding-top: 0 !important;
+            padding-top: 1.5rem !important;
             padding-bottom: 2.5rem !important;
         }
         </style>
@@ -247,7 +256,7 @@ def _compact_shell() -> None:
 def _page_header(execution: DemoExecution | None) -> str:
     st.markdown(
         """
-        <div style="padding-top: 4.5rem; margin-bottom: 1rem;">
+        <div style="padding-top: 0.5rem; margin-bottom: 1rem;">
             <div style="
                 font-size: 1.45rem;
                 font-weight: 650;
