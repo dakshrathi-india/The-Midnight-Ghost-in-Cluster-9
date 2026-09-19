@@ -233,19 +233,10 @@ def _compact_shell() -> None:
     st.html(
         """
         <style>
-        header[data-testid="stHeader"] {
-            display: none !important;
-        }
-        div[data-testid="stToolbar"] {
-            display: none !important;
-        }
-        div[data-testid="stDecoration"] {
-            display: none !important;
-        }
         div[data-testid="stMainBlockContainer"] {
             width: calc(100% - 48px) !important;
             max-width: 1320px !important;
-            padding-top: 1.5rem !important;
+            padding-top: 2.5rem !important;
             padding-bottom: 2.5rem !important;
         }
         </style>
@@ -254,38 +245,28 @@ def _compact_shell() -> None:
 
 
 def _page_header(execution: DemoExecution | None) -> str:
-    st.markdown(
-        """
-        <div style="padding-top: 0.5rem; margin-bottom: 1rem;">
-            <div style="
-                font-size: 1.45rem;
-                font-weight: 650;
-                line-height: 1.15;
-            ">Cluster 9</div>
-            <div style="
-                margin-top: 0.35rem;
-                font-size: 0.86rem;
-                color: #74716B;
-            ">Incident Investigator</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    navigation, status = st.columns(
+    title_column, status_column = st.columns(
         (8, 2), gap="medium", vertical_alignment="center"
     )
-    with navigation:
-        selected = st.segmented_control(
-            "Workspace section",
-            ("Overview", "Investigation", "Evaluation"),
-            default="Overview",
-            key="workspace-section",
-            label_visibility="collapsed",
-            width="stretch",
-            wrap=False,
+    with title_column:
+        st.markdown(
+            """
+            <div style="margin: 1.75rem 0 0.35rem 0;">
+                <span style="
+                    font-size: 1.45rem;
+                    font-weight: 650;
+                    line-height: 1.15;
+                ">Cluster 9</span>
+                <span style="
+                    margin-left: 0.75rem;
+                    font-size: 0.86rem;
+                    color: #74716B;
+                ">Incident Investigator</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-    with status:
+    with status_column:
         if execution is not None:
             recovery = execution.run.verification
             recovery_status = recovery.status.value if recovery else "NOT VERIFIED"
@@ -294,8 +275,17 @@ def _page_header(execution: DemoExecution | None) -> str:
                 f"**{recovery_status}**",
                 text_alignment="right",
             )
+
+    selected = st.radio(
+        "Workspace section",
+        ("Overview", "Investigation", "Evaluation"),
+        horizontal=True,
+        index=0,
+        key="workspace-section-radio",
+        label_visibility="collapsed",
+    )
     st.divider()
-    return str(selected or "Overview")
+    return str(selected)
 
 
 def _landing_state(config: SimulationConfig) -> None:
