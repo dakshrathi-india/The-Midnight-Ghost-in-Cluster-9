@@ -232,10 +232,10 @@ def _compact_shell() -> None:
     st.html("""
         <style>
         div[data-testid="stMainBlockContainer"] {
-            width: calc(100% - 48px);
-            max-width: 1320px;
-            padding-top: 4rem;
-            padding-bottom: 2.5rem;
+            width: calc(100% - 48px) !important;
+            max-width: 1320px !important;
+            padding-top: 7rem !important;
+            padding-bottom: 2.5rem !important;
         }
         </style>
         """)
