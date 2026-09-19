@@ -109,6 +109,7 @@ def main() -> None:
         initial_sidebar_state="collapsed",
     )
     _compact_shell()
+    st.html('<div aria-hidden="true" style="height: 4rem;"></div>')
     st.session_state.setdefault("demo_execution", None)
     st.session_state.setdefault("editing_setup", False)
 
@@ -229,16 +230,18 @@ def _setup_toolbar(
 
 
 def _compact_shell() -> None:
-    st.html("""
+    st.html(
+        """
         <style>
         div[data-testid="stMainBlockContainer"] {
             width: calc(100% - 48px) !important;
             max-width: 1320px !important;
-            padding-top: 7rem !important;
+            padding-top: 1rem !important;
             padding-bottom: 2.5rem !important;
         }
         </style>
-        """)
+        """
+    )
 
 
 def _page_header(execution: DemoExecution | None) -> str:
