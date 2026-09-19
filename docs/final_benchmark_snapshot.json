@@ -1,0 +1,101 @@
+{
+  "source": "Validated results reported in docs/whitepaper.md; checked in so deployed Streamlit can render evaluation without generated outputs/.",
+  "summaries": [
+    {
+      "profile": "CLEAN",
+      "ablation": "FULL_SYSTEM",
+      "exact_pair_accuracy": 0.989,
+      "root_service_accuracy": 0.989,
+      "failure_mode_accuracy": 0.989,
+      "resolved_rate": 0.989,
+      "verified_rate": 0.6111111111,
+      "false_resolution_count": 0,
+      "mean_query_usage": 14.52
+    },
+    {
+      "profile": "DEFAULT",
+      "ablation": "FULL_SYSTEM",
+      "exact_pair_accuracy": 0.667,
+      "root_service_accuracy": 0.667,
+      "failure_mode_accuracy": 0.689,
+      "resolved_rate": 0.778,
+      "verified_rate": 0.3444444444,
+      "false_resolution_count": 10,
+      "mean_query_usage": 14.59
+    }
+  ],
+  "ablations": [
+    {
+      "ablation": "FULL_SYSTEM",
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "verified_rate": 0.5714285714
+    },
+    {
+      "ablation": "NO_SEMANTIC_LOG_EVIDENCE",
+      "exact_pair_accuracy": 0,
+      "resolved_rate": 0,
+      "verified_rate": 0
+    },
+    {
+      "ablation": "NO_TRACE_EVIDENCE",
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "verified_rate": 0.5714285714
+    },
+    {
+      "ablation": "NO_ISOLATION_FOREST",
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "verified_rate": 0.5714285714
+    },
+    {
+      "ablation": "NO_CUSUM",
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "verified_rate": 0.5714285714
+    },
+    {
+      "ablation": "NO_MAD",
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "verified_rate": 0.5714285714
+    },
+    {
+      "ablation": "METRICS_ONLY",
+      "exact_pair_accuracy": 0,
+      "resolved_rate": 0,
+      "verified_rate": 0
+    }
+  ],
+  "budget_curve": [
+    {
+      "budget": 8,
+      "exact_pair_accuracy": 0,
+      "resolved_rate": 0,
+      "incomplete_budget_rate": 1,
+      "mean_query_usage": 8
+    },
+    {
+      "budget": 12,
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "incomplete_budget_rate": 0,
+      "mean_query_usage": 12
+    },
+    {
+      "budget": 17,
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "incomplete_budget_rate": 0,
+      "mean_query_usage": 15.14
+    },
+    {
+      "budget": 20,
+      "exact_pair_accuracy": 1,
+      "resolved_rate": 1,
+      "incomplete_budget_rate": 0,
+      "mean_query_usage": 15.14
+    }
+  ]
+}
