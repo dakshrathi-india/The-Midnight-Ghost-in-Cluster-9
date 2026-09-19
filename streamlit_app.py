@@ -110,9 +110,6 @@ def main() -> None:
     )
     _compact_shell()
 
-    st.space("large")
-    st.space("large")
-
     st.session_state.setdefault("demo_execution", None)
     st.session_state.setdefault("editing_setup", False)
 
@@ -239,7 +236,7 @@ def _compact_shell() -> None:
         div[data-testid="stMainBlockContainer"] {
             width: calc(100% - 48px) !important;
             max-width: 1320px !important;
-            padding-top: 0.5rem !important;
+            padding-top: 0 !important;
             padding-bottom: 2.5rem !important;
         }
         </style>
@@ -248,12 +245,27 @@ def _compact_shell() -> None:
 
 
 def _page_header(execution: DemoExecution | None) -> str:
-    identity, navigation, status = st.columns(
-        (3.1, 4.7, 2.2), gap="medium", vertical_alignment="center"
+    st.markdown(
+        """
+        <div style="padding-top: 4.5rem; margin-bottom: 1rem;">
+            <div style="
+                font-size: 1.45rem;
+                font-weight: 650;
+                line-height: 1.15;
+            ">Cluster 9</div>
+            <div style="
+                margin-top: 0.35rem;
+                font-size: 0.86rem;
+                color: #74716B;
+            ">Incident Investigator</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    with identity:
-        st.subheader("Cluster 9")
-        st.caption("Incident Investigator")
+
+    navigation, status = st.columns(
+        (8, 2), gap="medium", vertical_alignment="center"
+    )
     with navigation:
         selected = st.segmented_control(
             "Workspace section",
