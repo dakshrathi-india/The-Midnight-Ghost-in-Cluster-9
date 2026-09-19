@@ -41,11 +41,24 @@ class GroundTruth:
 
 
 @dataclass(frozen=True, slots=True)
+class HealthyGroundTruth:
+    incident_id: str
+    clock_offsets_seconds: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "clock_offsets_seconds",
+            MappingProxyType(dict(self.clock_offsets_seconds)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Incident:
     incident_id: str
     telemetry: TelemetryStore
     baseline: BaselineStore
-    ground_truth: GroundTruth
+    ground_truth: GroundTruth | HealthyGroundTruth
     observed_start_time: datetime
     observed_end_time: datetime
 
@@ -60,12 +73,43 @@ class IncidentGenerator:
     def start_session(
         self, seed: int, fault: FaultRequest | None = None
     ) -> "SimulationIncidentSession":
+        return self._start_session(seed, fault, healthy=False)
+
+    def generate_healthy(self, seed: int) -> Incident:
+        return self.start_healthy_session(seed).initial_incident
+
+    def start_healthy_session(self, seed: int) -> "SimulationIncidentSession":
+        return self._start_session(seed, None, healthy=True)
+
+    def _start_session(
+        self,
+        seed: int,
+        fault: FaultRequest | None,
+        *,
+        healthy: bool,
+    ) -> "SimulationIncidentSession":
         rng = random.Random(seed)
-        root_service, failure_mode, parameters = self._resolve_fault(rng, fault or FaultRequest())
+        if healthy:
+            root_service = failure_mode = None
+            parameters: dict[str, float] = {}
+        else:
+            root_service, failure_mode, parameters = self._resolve_fault(
+                rng, fault or FaultRequest()
+            )
         start_time = datetime(2025, 1, 1, tzinfo=timezone.utc) + timedelta(days=seed % 365)
         fault_step = self.config.baseline_steps
         simulator = MicroserviceSimulator(self.config, seed)
-        raw = simulator.run(start_time, fault_step, root_service, failure_mode, parameters)
+        if healthy:
+            raw = simulator.run_healthy(start_time)
+        else:
+            assert root_service is not None and failure_mode is not None
+            raw = simulator.run(
+                start_time,
+                fault_step,
+                root_service,
+                failure_mode,
+                parameters,
+            )
 
         normalizer = TelemetryNormalizer()
         canonical_names = {
@@ -86,7 +130,11 @@ class IncidentGenerator:
             },
         )
         offsets = self._clock_offsets(rng)
-        decoys = self._select_decoys(rng, root_service)
+        if healthy:
+            decoys = ()
+        else:
+            assert root_service is not None
+            decoys = self._select_decoys(rng, root_service)
         fragmented = _apply_imperfections(
             self.config, raw, rng, offsets, decoys, fault_time
         )
@@ -95,23 +143,32 @@ class IncidentGenerator:
         spans = normalizer.normalize_spans(fragmented.spans)
         store = TelemetryStore(metrics, logs, spans)
 
-        affected = frozenset(
-            canonical_names[name] for name in self._affected_services(root_service)
-        )
-        canonical_root = canonical_names[root_service]
         canonical_decoys = tuple(canonical_names[name] for name in decoys)
         canonical_offsets = {canonical_names[name]: value for name, value in offsets.items()}
-        incident_id = f"incident-{seed}-{canonical_root}-{failure_mode}"
-        ground_truth = GroundTruth(
-            incident_id,
-            canonical_root,
-            failure_mode,
-            fault_time,
-            affected,
-            parameters,
-            canonical_offsets,
-            canonical_decoys,
-        )
+        if healthy:
+            incident_id = f"healthy-{seed}"
+            ground_truth: GroundTruth | HealthyGroundTruth = HealthyGroundTruth(
+                incident_id,
+                canonical_offsets,
+            )
+        else:
+            assert root_service is not None and failure_mode is not None
+            canonical_root = canonical_names[root_service]
+            affected = frozenset(
+                canonical_names[name]
+                for name in self._affected_services(root_service)
+            )
+            incident_id = f"incident-{seed}-{canonical_root}-{failure_mode}"
+            ground_truth = GroundTruth(
+                incident_id,
+                canonical_root,
+                failure_mode,
+                fault_time,
+                affected,
+                parameters,
+                canonical_offsets,
+                canonical_decoys,
+            )
         all_times = (
             [event.event_timestamp for event in metrics]
             + [event.event_timestamp for event in logs]
@@ -200,7 +257,7 @@ class SimulationIncidentSession:
         normalizer: TelemetryNormalizer,
         telemetry: TelemetryStore,
         baseline: BaselineStore,
-        ground_truth: GroundTruth,
+        ground_truth: GroundTruth | HealthyGroundTruth,
         initial_incident: Incident,
         fault_time: datetime,
     ) -> None:

@@ -61,23 +61,32 @@ def _diagnosis(
     failure_mode: str = "process_crash",
     strength: CandidateStrength = CandidateStrength.STRONG,
     directly_confirmed: bool = True,
-    direct_category: EvidenceCategory = EvidenceCategory.LOG_SEMANTIC,
+    direct_categories: tuple[EvidenceCategory, ...] = (
+        EvidenceCategory.METRIC_PATTERN,
+        EvidenceCategory.LOG_SEMANTIC,
+    ),
     contradictory: bool = False,
 ) -> DiagnosisResult:
     hypothesis = Hypothesis(service, failure_mode, strength)
     evidence = []
     if directly_confirmed:
-        evidence.append(
-            CausalEvidence(
-                direct_category,
-                service,
-                failure_mode,
-                "matching semantic log",
-                EvidenceStatus.SUPPORT,
-                "The target has direct semantic confirmation.",
-                START,
+        observation_by_category = {
+            EvidenceCategory.METRIC_PATTERN: "matching metric pattern",
+            EvidenceCategory.LOG_SEMANTIC: "matching semantic log",
+            EvidenceCategory.TRACE_LOCALIZATION: "matching trace localization",
+        }
+        for direct_category in direct_categories:
+            evidence.append(
+                CausalEvidence(
+                    direct_category,
+                    service,
+                    failure_mode,
+                    observation_by_category[direct_category],
+                    EvidenceStatus.SUPPORT,
+                    "The target has direct confirmation.",
+                    START,
+                )
             )
-        )
     if contradictory:
         evidence.append(
             CausalEvidence(
@@ -94,7 +103,13 @@ def _diagnosis(
         tuple(evidence),
         (service,),
         (),
-        RankingComponents(int(contradictory), 0, 1, 1, 1),
+        RankingComponents(
+            int(contradictory),
+            0,
+            1,
+            len(set(direct_categories)),
+            len(set(direct_categories)),
+        ),
     )
     candidate = ServiceCandidate(service, strength, ("mad", "change_point"), 2, False, ())
     return DiagnosisResult(
@@ -121,14 +136,18 @@ def test_failure_modes_have_exact_declarative_remediation_actions() -> None:
 
 
 @pytest.mark.parametrize(
-    "direct_category",
-    (EvidenceCategory.LOG_SEMANTIC, EvidenceCategory.TRACE_LOCALIZATION),
+    "direct_categories",
+    (
+        (EvidenceCategory.METRIC_PATTERN, EvidenceCategory.LOG_SEMANTIC),
+        (EvidenceCategory.METRIC_PATTERN, EvidenceCategory.TRACE_LOCALIZATION),
+        (EvidenceCategory.LOG_SEMANTIC, EvidenceCategory.TRACE_LOCALIZATION),
+    ),
 )
-def test_resolved_strong_directly_confirmed_diagnosis_is_planned(
-    direct_category: EvidenceCategory,
+def test_resolved_strong_with_two_direct_modalities_is_planned(
+    direct_categories: tuple[EvidenceCategory, ...],
 ) -> None:
     outcome = SafeRemediationPlanner().plan(
-        _diagnosis(direct_category=direct_category),
+        _diagnosis(direct_categories=direct_categories),
         _baseline(),
     )
 
@@ -140,10 +159,23 @@ def test_resolved_strong_directly_confirmed_diagnosis_is_planned(
     assert outcome.action.safely_bounded
 
 
+def test_one_direct_modality_is_blocked_with_exact_reason() -> None:
+    outcome = SafeRemediationPlanner().plan(
+        _diagnosis(direct_categories=(EvidenceCategory.LOG_SEMANTIC,)),
+        _baseline(),
+    )
+
+    assert outcome.status is PlanningStatus.BLOCKED
+    assert outcome.reason == (
+        "insufficient orthogonal evidence for autonomous remediation"
+    )
+
+
 @pytest.mark.parametrize(
     "status",
     (
         DiagnosisStatus.AMBIGUOUS,
+        DiagnosisStatus.UNSUPPORTED,
         DiagnosisStatus.INCOMPLETE_BUDGET,
         DiagnosisStatus.NO_CANDIDATES,
     ),

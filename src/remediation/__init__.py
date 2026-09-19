@@ -4,6 +4,8 @@ from .domain import (
     ExecutionReceipt,
     ExecutionStatus,
     FreshObservationWindow,
+    IncidentPhase,
+    IncidentTransition,
     PlanningOutcome,
     PlanningStatus,
     PostActionObserver,
@@ -11,13 +13,19 @@ from .domain import (
     RemediationActionType,
     RemediationExecutor,
     execute_if_planned,
+    validate_incident_transitions,
 )
 from .controller import (
     RecoveryController,
     RecoveryControllerConfig,
     RecoveryRunResult,
 )
-from .planner import FAILURE_MODE_ACTIONS, SafeRemediationPlanner
+from .planner import (
+    DIRECT_ACTION_MODALITIES,
+    FAILURE_MODE_ACTIONS,
+    SafeRemediationPlanner,
+    direct_evidence_modalities,
+)
 from .recovery import (
     MetricRecoveryFinding,
     RecoveryConfig,
@@ -31,8 +39,11 @@ from .recovery import (
 __all__ = [
     "ExecutionReceipt",
     "ExecutionStatus",
+    "DIRECT_ACTION_MODALITIES",
     "FAILURE_MODE_ACTIONS",
     "FreshObservationWindow",
+    "IncidentPhase",
+    "IncidentTransition",
     "MetricRecoveryFinding",
     "PlanningOutcome",
     "PlanningStatus",
@@ -51,4 +62,6 @@ __all__ = [
     "ServiceRecoveryFinding",
     "TrafficContinuityFinding",
     "execute_if_planned",
+    "direct_evidence_modalities",
+    "validate_incident_transitions",
 ]

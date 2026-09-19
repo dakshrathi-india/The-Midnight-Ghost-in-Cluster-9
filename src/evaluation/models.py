@@ -31,6 +31,10 @@ class BenchmarkIncidentResult:
     remediation_target_correct: bool
     verification_window_count: int
     follow_up_diagnosis_status: str | None
+    localized_service: str | None = None
+    action_eligible: bool = False
+    action_blocked_for_evidence: bool = False
+    confirmation_query_count: int = 0
 
     def as_row(self) -> dict[str, object]:
         return asdict(self)
@@ -72,6 +76,11 @@ class BenchmarkSummary:
     p95_total_query_cost: float
     blocked_unsafe_action_count: int
     wrong_action_verified_count: int
+    unsupported_count: int
+    unsupported_rate: float
+    action_eligible_count: int
+    action_blocked_for_evidence_count: int
+    confirmation_query_count: int
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -148,6 +157,72 @@ def summarize_results(
             and item.recovery_status == RecoveryStatus.VERIFIED.value
             for item in results
         ),
+        unsupported_count=status_counts[DiagnosisStatus.UNSUPPORTED.value],
+        unsupported_rate=_rate(
+            status_counts[DiagnosisStatus.UNSUPPORTED.value], count
+        ),
+        action_eligible_count=sum(item.action_eligible for item in results),
+        action_blocked_for_evidence_count=sum(
+            item.action_blocked_for_evidence for item in results
+        ),
+        confirmation_query_count=sum(
+            item.confirmation_query_count for item in results
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HealthyControlResult:
+    profile: str
+    seed: int
+    diagnosis_status: str
+    diagnosis_query_budget_spent: int
+    total_query_budget_spent: int
+    action_count: int
+    preserved: bool
+
+    def as_row(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class HealthyControlSummary:
+    profile: str
+    healthy_case_count: int
+    healthy_no_candidate_count: int
+    healthy_no_candidate_rate: float
+    healthy_action_count: int
+    healthy_action_rate: float
+    healthy_preserved_count: int
+    healthy_preserved_rate: float
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def summarize_healthy_results(
+    results: Sequence[HealthyControlResult],
+    *,
+    profile: str,
+) -> HealthyControlSummary:
+    if not results:
+        raise ValueError("cannot summarize an empty healthy-control result set")
+    count = len(results)
+    no_candidate_count = sum(
+        item.diagnosis_status == DiagnosisStatus.NO_CANDIDATES.value
+        for item in results
+    )
+    action_count = sum(item.action_count for item in results)
+    preserved_count = sum(item.preserved for item in results)
+    return HealthyControlSummary(
+        profile,
+        count,
+        no_candidate_count,
+        _rate(no_candidate_count, count),
+        action_count,
+        _rate(action_count, count),
+        preserved_count,
+        _rate(preserved_count, count),
     )
 
 

@@ -85,6 +85,29 @@ class MicroserviceSimulator:
             self.config.baseline_steps + self.config.incident_steps
         )
 
+    def run_healthy(
+        self,
+        start_time: datetime,
+    ) -> SimulationOutput:
+        """Run the normal simulator trajectory without activating a fault."""
+        if self._start_time is not None:
+            raise RuntimeError("simulation run has already started")
+        self._start_time = start_time
+        self._fault_scenario = _FaultScenario(
+            "",
+            "",
+            {},
+            self.config.baseline_steps,
+            mitigated=True,
+        )
+        return self.continue_run(
+            self.config.baseline_steps + self.config.incident_steps
+        )
+
+    @property
+    def current_states(self) -> dict[str, ServiceState]:
+        return dict(self._previous_states)
+
     def start_run(
         self,
         start_time: datetime,

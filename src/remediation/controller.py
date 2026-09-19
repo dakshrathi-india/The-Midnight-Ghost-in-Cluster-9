@@ -9,16 +9,20 @@ from typing import Mapping
 
 from src.core.baseline import BaselineStore
 from src.core.telemetry import TelemetryQueryAPI
-from src.rca.agent import DiagnosisAgent, DiagnosisResult
+from src.rca.agent import DiagnosisAgent, DiagnosisResult, DiagnosisStatus
+from src.rca.candidates import CandidateStrength
 
 from .domain import (
     ExecutionReceipt,
     ExecutionStatus,
     FreshObservationWindow,
+    IncidentPhase,
+    IncidentTransition,
     PlanningOutcome,
     PlanningStatus,
     PostActionObserver,
     RemediationExecutor,
+    validate_incident_transitions,
 )
 from .planner import SafeRemediationPlanner
 from .recovery import RecoveryStatus, RecoveryVerification, RecoveryVerifier
@@ -45,12 +49,18 @@ class RecoveryRunResult:
     observed_windows: tuple[FreshObservationWindow, ...]
     intervention_feedback: Mapping[tuple[str, str], str]
     follow_up_diagnosis: DiagnosisResult | None
+    state_history: tuple[IncidentTransition, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "intervention_feedback",
             MappingProxyType(dict(self.intervention_feedback)),
+        )
+        object.__setattr__(
+            self,
+            "state_history",
+            validate_incident_transitions(self.state_history),
         )
 
 
@@ -81,9 +91,29 @@ class RecoveryController:
             api, baseline, analysis_start, analysis_end
         )
         planning = self._planner.plan(diagnosis, baseline)
+        if (
+            planning.status is PlanningStatus.BLOCKED
+            and planning.reason
+            == "insufficient orthogonal evidence for autonomous remediation"
+        ):
+            diagnosis = self._diagnosis_agent.confirm_for_action(
+                api,
+                baseline,
+                analysis_start,
+                analysis_end,
+                diagnosis,
+            )
+            planning = self._planner.plan(diagnosis, baseline)
         if planning.status is PlanningStatus.BLOCKED:
             return RecoveryRunResult(
-                diagnosis, planning, None, None, (), {}, None
+                diagnosis,
+                planning,
+                None,
+                None,
+                (),
+                {},
+                None,
+                _build_state_history(diagnosis, planning),
             )
 
         assert planning.action is not None
@@ -98,7 +128,16 @@ class RecoveryController:
                 None,
             )
             return RecoveryRunResult(
-                diagnosis, planning, receipt, verification, (), {}, None
+                diagnosis,
+                planning,
+                receipt,
+                verification,
+                (),
+                {},
+                None,
+                _build_state_history(
+                    diagnosis, planning, receipt, verification
+                ),
             )
 
         windows: list[FreshObservationWindow] = []
@@ -147,4 +186,81 @@ class RecoveryController:
             tuple(windows),
             feedback,
             follow_up,
+            _build_state_history(
+                diagnosis,
+                planning,
+                receipt,
+                verification,
+                follow_up,
+            ),
         )
+
+
+def _build_state_history(
+    diagnosis: DiagnosisResult,
+    planning: PlanningOutcome,
+    receipt: ExecutionReceipt | None = None,
+    verification: RecoveryVerification | None = None,
+    follow_up: DiagnosisResult | None = None,
+) -> tuple[IncidentTransition, ...]:
+    transitions: list[IncidentTransition] = []
+
+    def advance(phase: IncidentPhase, reason: str) -> None:
+        previous = transitions[-1].to_phase if transitions else None
+        transitions.append(IncidentTransition(previous, phase, reason))
+
+    advance(IncidentPhase.DETECTED, "incident investigation started")
+    _append_diagnosis_phases(transitions, diagnosis)
+    if planning.status is PlanningStatus.PLANNED:
+        advance(IncidentPhase.ACTION_ELIGIBLE, planning.reason)
+    else:
+        advance(IncidentPhase.ACTION_BLOCKED, planning.reason)
+        return validate_incident_transitions(transitions)
+
+    if receipt is None:
+        raise ValueError("planned remediation requires an execution receipt")
+    if receipt.status is ExecutionStatus.APPLIED:
+        advance(IncidentPhase.APPLIED, receipt.message)
+    else:
+        advance(IncidentPhase.EXECUTION_FAILED, receipt.message)
+
+    if verification is None:
+        advance(IncidentPhase.INCONCLUSIVE, "recovery was not verified")
+    elif verification.status is RecoveryStatus.VERIFIED:
+        advance(IncidentPhase.VERIFIED, verification.reason)
+    elif verification.status is RecoveryStatus.FAILED:
+        advance(IncidentPhase.RECOVERY_FAILED, verification.reason)
+    else:
+        advance(IncidentPhase.INCONCLUSIVE, verification.reason)
+
+    if follow_up is not None:
+        advance(IncidentPhase.DETECTED, "follow-up investigation started")
+        _append_diagnosis_phases(transitions, follow_up)
+    return validate_incident_transitions(transitions)
+
+
+def _append_diagnosis_phases(
+    transitions: list[IncidentTransition],
+    diagnosis: DiagnosisResult,
+) -> None:
+    def advance(phase: IncidentPhase, reason: str) -> None:
+        previous = transitions[-1].to_phase if transitions else None
+        transitions.append(IncidentTransition(previous, phase, reason))
+
+    has_candidate = any(
+        candidate.strength is not CandidateStrength.NOT_CANDIDATE
+        for candidate in diagnosis.candidates
+    )
+    if has_candidate:
+        advance(IncidentPhase.CANDIDATE, "anomaly candidates were identified")
+    phase_by_status = {
+        DiagnosisStatus.RESOLVED: IncidentPhase.RESOLVED,
+        DiagnosisStatus.AMBIGUOUS: IncidentPhase.AMBIGUOUS,
+        DiagnosisStatus.UNSUPPORTED: IncidentPhase.UNSUPPORTED,
+        DiagnosisStatus.INCOMPLETE_BUDGET: IncidentPhase.INCOMPLETE_BUDGET,
+        DiagnosisStatus.NO_CANDIDATES: IncidentPhase.NO_CANDIDATES,
+    }
+    advance(
+        phase_by_status[diagnosis.status],
+        f"diagnosis status is {diagnosis.status.value}",
+    )

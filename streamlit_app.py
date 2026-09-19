@@ -16,6 +16,7 @@ from src.evaluation import RobustnessProfile, fragmentation_for
 from src.rca import (
     CandidateStrength,
     CausalEvidence,
+    DiagnosisStatus,
     EvidenceCategory,
     EvidenceStatus,
     FailureSignatureLibrary,
@@ -290,13 +291,20 @@ def _landing_state(config: SimulationConfig) -> None:
 def _overview(execution: DemoExecution) -> None:
     diagnosis = execution.run.diagnosis
     diagnosed = diagnosis.best_hypothesis
+    localized_service = diagnosis.localized_service
     affected_services = tuple(
         candidate.service
         for candidate in diagnosis.candidates
         if candidate.strength is not CandidateStrength.NOT_CANDIDATE
     )
-    root = diagnosed.service if diagnosed else "Unresolved"
-    failure_mode = diagnosed.failure_mode if diagnosed else "No failure mode"
+    root = diagnosed.service if diagnosed else localized_service or "Unresolved"
+    failure_mode = (
+        diagnosed.failure_mode
+        if diagnosed
+        else "Unknown / unsupported"
+        if diagnosis.status is DiagnosisStatus.UNSUPPORTED
+        else "No failure mode"
+    )
 
     st.space("small")
     map_column, diagnosis_column = st.columns((8, 4), gap="large")
@@ -305,7 +313,7 @@ def _overview(execution: DemoExecution) -> None:
         st.graphviz_chart(
             topology_dot(
                 execution.config,
-                diagnosed.service if diagnosed else None,
+                diagnosed.service if diagnosed else localized_service,
                 affected_services,
             ),
             width="stretch",
@@ -341,8 +349,9 @@ def _overview(execution: DemoExecution) -> None:
             else:
                 st.caption("No causal evidence was produced.")
 
-    root_service = diagnosed.service if diagnosed else execution.requested_service
-    _telemetry_panel(execution, root_service)
+    root_service = diagnosed.service if diagnosed else localized_service
+    if root_service is not None:
+        _telemetry_panel(execution, root_service)
     _response_and_budget(execution)
 
 
@@ -670,6 +679,7 @@ def _evidence_row_style(row: pd.Series) -> list[str]:
 def _response_and_budget(execution: DemoExecution) -> None:
     run = execution.run
     hypothesis = run.diagnosis.best_hypothesis
+    localized_service = run.diagnosis.localized_service
     action = run.planning.action
     verification = run.verification
     action_value = action.action_type.value if action else "ACTION BLOCKED"
@@ -687,6 +697,9 @@ def _response_and_budget(execution: DemoExecution) -> None:
             (
                 f"{hypothesis.service} / {hypothesis.failure_mode}"
                 if hypothesis
+                else f"{localized_service} / Unknown / unsupported"
+                if run.diagnosis.status is DiagnosisStatus.UNSUPPORTED
+                and localized_service is not None
                 else "Not resolved"
             ),
         ),

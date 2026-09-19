@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from typing import Callable, Mapping, Protocol, Sequence
@@ -23,12 +23,15 @@ from .anomaly import (
 from .candidates import CandidateGenerator, CandidateStrength, ServiceCandidate
 from .diagnosis import (
     DiagnosisConfig,
+    DiagnosisDecisionExplanation,
     EvidenceCategory,
     EvidenceStatus,
     Hypothesis,
     HypothesisEvaluation,
     HypothesisEvaluator,
     HypothesisGenerator,
+    explain_ranked_decision,
+    explain_unsupported_decision,
     rank_evaluations,
 )
 from .graph import TraceGraphAnalyzer
@@ -40,6 +43,7 @@ from .signatures import FailureSignatureLibrary
 class DiagnosisStatus(str, Enum):
     RESOLVED = "RESOLVED"
     AMBIGUOUS = "AMBIGUOUS"
+    UNSUPPORTED = "UNSUPPORTED"
     INCOMPLETE_BUDGET = "INCOMPLETE_BUDGET"
     NO_CANDIDATES = "NO_CANDIDATES"
 
@@ -59,6 +63,9 @@ class DiagnosisResult:
     queries_executed: tuple[QueryHistoryEntry, ...]
     budget_spent: int
     budget_remaining: int
+    localized_service: str | None = None
+    decision_explanation: DiagnosisDecisionExplanation | None = None
+    confirmation_query_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +202,18 @@ class DiagnosisAgent:
                     api,
                     history_start,
                 )
+            unsupported_service = self._unsupported_service(ranked, candidates)
+            if unsupported_service is not None:
+                return self._result(
+                    DiagnosisStatus.UNSUPPORTED,
+                    None,
+                    ranked,
+                    candidates,
+                    planned_queries,
+                    api,
+                    history_start,
+                    localized_service=unsupported_service,
+                )
 
             cohort = self._planner_cohort(ranked)
             next_query = self._planner.choose_next(
@@ -243,6 +262,18 @@ class DiagnosisAgent:
             )
             ranked = rank_evaluations(evaluations)
 
+        unsupported_service = self._unsupported_service(ranked, candidates)
+        if unsupported_service is not None:
+            return self._result(
+                DiagnosisStatus.UNSUPPORTED,
+                None,
+                ranked,
+                candidates,
+                planned_queries,
+                api,
+                history_start,
+                localized_service=unsupported_service,
+            )
         return self._result(
             DiagnosisStatus.AMBIGUOUS,
             ranked[0].hypothesis if ranked else None,
@@ -251,6 +282,156 @@ class DiagnosisAgent:
             planned_queries,
             api,
             history_start,
+        )
+
+    def confirm_for_action(
+        self,
+        api: TelemetryQueryAPI,
+        baseline: BaselineStore,
+        start_time: datetime,
+        end_time: datetime,
+        diagnosis: DiagnosisResult,
+    ) -> DiagnosisResult:
+        if (
+            diagnosis.status is not DiagnosisStatus.RESOLVED
+            or diagnosis.best_hypothesis is None
+        ):
+            return diagnosis
+        evaluation = next(
+            (
+                item
+                for item in diagnosis.ranked_hypotheses
+                if item.hypothesis == diagnosis.best_hypothesis
+            ),
+            None,
+        )
+        if evaluation is None:
+            return diagnosis
+        direct = {
+            evidence.category
+            for evidence in evaluation.supporting_evidence
+            if evidence.service == evaluation.hypothesis.service
+            and evidence.category
+            in {
+                EvidenceCategory.METRIC_PATTERN,
+                EvidenceCategory.LOG_SEMANTIC,
+                EvidenceCategory.TRACE_LOCALIZATION,
+            }
+        }
+        if len(direct) != 1:
+            return diagnosis
+        if any(
+            api.query_cost("metrics", service, start_time, end_time) != 0
+            for service in baseline.known_services
+        ):
+            return diagnosis
+
+        query_by_category = (
+            (EvidenceCategory.LOG_SEMANTIC, "logs"),
+            (EvidenceCategory.TRACE_LOCALIZATION, "traces"),
+            (EvidenceCategory.METRIC_PATTERN, "metrics"),
+        )
+        service = diagnosis.best_hypothesis.service
+        query_type = next(
+            (
+                candidate_query
+                for category, candidate_query in query_by_category
+                if category not in direct
+                and api.query_cost(candidate_query, service, start_time, end_time) > 0
+                and api.can_afford(candidate_query, service, start_time, end_time)
+            ),
+            None,
+        )
+        if query_type is None:
+            return diagnosis
+
+        history_start = len(api.query_history)
+        cost = api.query_cost(query_type, service, start_time, end_time)
+        confirmation = PlannedQuery(
+            query_type,
+            service,
+            start_time,
+            end_time,
+            0,
+            cost,
+            0.0,
+        )
+        metrics_by_service: dict[str, tuple[MetricEvent, ...]] = {}
+        logs_by_service: dict[str, tuple[LogEvent, ...]] = {}
+        spans_by_service: dict[str, tuple[SpanEvent, ...]] = {}
+        self._execute(
+            confirmation,
+            api,
+            metrics_by_service,
+            logs_by_service,
+            spans_by_service,
+        )
+        for observed_service in sorted(baseline.known_services):
+            for cached_type, target in (
+                ("metrics", metrics_by_service),
+                ("logs", logs_by_service),
+                ("traces", spans_by_service),
+            ):
+                if api.query_cost(
+                    cached_type, observed_service, start_time, end_time
+                ) != 0:
+                    continue
+                cached_query = PlannedQuery(
+                    cached_type,
+                    observed_service,
+                    start_time,
+                    end_time,
+                    0,
+                    0,
+                    0.0,
+                )
+                self._execute(
+                    cached_query,
+                    api,
+                    metrics_by_service,
+                    logs_by_service,
+                    spans_by_service,
+                )
+
+        observed_services = tuple(sorted(metrics_by_service))
+        candidates, evaluations = self._analyze(
+            observed_services,
+            metrics_by_service,
+            logs_by_service,
+            spans_by_service,
+            baseline,
+        )
+        ranked = rank_evaluations(evaluations)
+        unsupported = self._unsupported_service(ranked, candidates)
+        if self._is_resolved(ranked):
+            status = DiagnosisStatus.RESOLVED
+            best = ranked[0].hypothesis
+            localized_service = best.service
+        elif unsupported is not None:
+            status = DiagnosisStatus.UNSUPPORTED
+            best = None
+            localized_service = unsupported
+        else:
+            status = DiagnosisStatus.AMBIGUOUS
+            best = ranked[0].hypothesis if ranked else None
+            localized_service = best.service if best is not None else None
+        result = self._result(
+            status,
+            best,
+            ranked,
+            candidates,
+            (*diagnosis.planned_queries, confirmation),
+            api,
+            history_start,
+            localized_service=localized_service,
+            confirmation_query_count=diagnosis.confirmation_query_count + 1,
+        )
+        return replace(
+            result,
+            queries_executed=(
+                *diagnosis.queries_executed,
+                *result.queries_executed,
+            ),
         )
 
     def _bootstrap_order(
@@ -407,6 +588,73 @@ class DiagnosisAgent:
         }
         return bool(direct_confirming_categories)
 
+    def _unsupported_service(
+        self,
+        ranked: Sequence[HypothesisEvaluation],
+        candidates: Sequence[ServiceCandidate],
+    ) -> str | None:
+        strong_services = {
+            candidate.service
+            for candidate in candidates
+            if candidate.strength is CandidateStrength.STRONG
+        }
+        if not strong_services:
+            return None
+        if any(
+            evaluation.ranking.contradiction_count == 0
+            for evaluation in ranked
+        ):
+            return None
+        by_service = {
+            service: tuple(
+                evaluation
+                for evaluation in ranked
+                if evaluation.hypothesis.service == service
+            )
+            for service in strong_services
+        }
+        complete = {
+            service: evaluations
+            for service, evaluations in by_service.items()
+            if {
+                evaluation.hypothesis.failure_mode
+                for evaluation in evaluations
+            }
+            == set(self.signatures.failure_modes)
+        }
+        if not complete:
+            return None
+        localization_keys = {
+            service: (
+                min(
+                    evaluation.ranking.unexplained_strong_count
+                    for evaluation in evaluations
+                ),
+                -max(
+                    evaluation.ranking.explained_strong_count
+                    for evaluation in evaluations
+                ),
+            )
+            for service, evaluations in complete.items()
+        }
+        best_key = min(localization_keys.values())
+        localized = tuple(
+            sorted(
+                service
+                for service, key in localization_keys.items()
+                if key == best_key
+            )
+        )
+        if len(localized) != 1:
+            return None
+        service = localized[0]
+        if all(
+            evaluation.ranking.contradiction_count > 0
+            for evaluation in complete[service]
+        ):
+            return service
+        return None
+
     @staticmethod
     def _result(
         status: DiagnosisStatus,
@@ -416,16 +664,28 @@ class DiagnosisAgent:
         planned: Sequence[PlannedQuery],
         api: TelemetryQueryAPI,
         history_start: int,
+        localized_service: str | None = None,
+        confirmation_query_count: int = 0,
     ) -> DiagnosisResult:
+        ranked_tuple = tuple(ranked)
+        explanation = (
+            explain_unsupported_decision(localized_service, ranked_tuple)
+            if status is DiagnosisStatus.UNSUPPORTED
+            and localized_service is not None
+            else explain_ranked_decision(ranked_tuple)
+        )
         return DiagnosisResult(
             status,
             best,
-            tuple(ranked),
+            ranked_tuple,
             tuple(candidates),
             tuple(planned),
             api.query_history[history_start:],
             api.spent_budget,
             api.remaining_budget,
+            localized_service or (best.service if best is not None else None),
+            explanation,
+            confirmation_query_count,
         )
 
 

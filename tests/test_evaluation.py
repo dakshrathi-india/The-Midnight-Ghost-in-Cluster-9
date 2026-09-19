@@ -13,7 +13,11 @@ from src.evaluation.benchmark import (
     enumerate_fault_cases,
     write_outputs,
 )
-from src.evaluation.models import BenchmarkIncidentResult, summarize_results
+from src.evaluation.models import (
+    BenchmarkIncidentResult,
+    summarize_healthy_results,
+    summarize_results,
+)
 from src.core import BaselineStore
 from src.rca import DiagnosisAgent, EvidenceCategory
 from src.simulation import (
@@ -87,6 +91,25 @@ def test_benchmark_is_deterministic_and_full_system_matches_default_agent() -> N
         incident.observed_end_time,
     )
     assert full == default
+
+
+def test_healthy_controls_use_normal_pipeline_and_never_execute_actions() -> None:
+    for profile in (RobustnessProfile.CLEAN, RobustnessProfile.DEFAULT):
+        runner = BenchmarkRunner(
+            benchmark_config(fragmentation_for(profile)),
+            profile=profile.value,
+            verification_steps=8,
+        )
+
+        results = runner.run_healthy((1, 3))
+        summary = summarize_healthy_results(results, profile=profile.value)
+
+        assert summary.healthy_case_count == 2
+        assert summary.healthy_no_candidate_count == 2
+        assert summary.healthy_no_candidate_rate == 1.0
+        assert summary.healthy_action_count == 0
+        assert summary.healthy_action_rate == 0.0
+        assert summary.healthy_preserved_rate == 1.0
 
 
 def test_each_robustness_profile_is_reproducible() -> None:

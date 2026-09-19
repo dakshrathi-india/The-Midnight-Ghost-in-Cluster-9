@@ -24,6 +24,7 @@ from .agent import (
 from .diagnosis import (
     CausalEvidence,
     DiagnosisConfig,
+    DiagnosisDecisionExplanation,
     EvidenceCategory,
     EvidenceStatus,
     Hypothesis,
@@ -37,6 +38,8 @@ from .diagnosis import (
     TraceLocalizationKind,
     TraceLocalizer,
     dependency_path,
+    explain_ranked_decision,
+    explain_unsupported_decision,
     rank_evaluations,
 )
 from .graph import (
@@ -75,6 +78,7 @@ __all__ = [
     "DiagnosisAgent",
     "DiagnosisAgentConfig",
     "DiagnosisConfig",
+    "DiagnosisDecisionExplanation",
     "DiagnosisResult",
     "DiagnosisStatus",
     "DependencyEdge",
@@ -118,5 +122,7 @@ __all__ = [
     "HypothesisEvaluator",
     "HypothesisGenerator",
     "dependency_path",
+    "explain_ranked_decision",
+    "explain_unsupported_decision",
     "rank_evaluations",
 ]

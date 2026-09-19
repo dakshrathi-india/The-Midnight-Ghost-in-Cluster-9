@@ -139,6 +139,20 @@ class HypothesisEvaluation:
 
 
 @dataclass(frozen=True, slots=True)
+class DiagnosisDecisionExplanation:
+    winner: Hypothesis | None
+    runner_up: Hypothesis | None
+    first_differing_criterion: str | None
+    winner_value: int | None
+    runner_up_value: int | None
+    support_unique_to_winner: tuple[CausalEvidence, ...]
+    contradictions_unique_to_runner: tuple[CausalEvidence, ...]
+    summary: str
+    localized_service: str | None = None
+    known_modes_rejected: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class DiagnosisConfig:
     temporal_tolerance: timedelta = timedelta(seconds=8)
     direction_modified_z_threshold: float = 2.5
@@ -842,6 +856,140 @@ def rank_evaluations(
     evaluations: Sequence[HypothesisEvaluation],
 ) -> tuple[HypothesisEvaluation, ...]:
     return tuple(sorted(evaluations, key=lambda evaluation: evaluation.sort_key()))
+
+
+def explain_ranked_decision(
+    ranked: Sequence[HypothesisEvaluation],
+) -> DiagnosisDecisionExplanation | None:
+    if not ranked:
+        return None
+    winner = ranked[0]
+    runner = ranked[1] if len(ranked) > 1 else None
+    if runner is None:
+        return DiagnosisDecisionExplanation(
+            winner.hypothesis,
+            None,
+            None,
+            None,
+            None,
+            winner.supporting_evidence,
+            (),
+            "Only one known hypothesis was available for causal comparison.",
+            winner.hypothesis.service,
+        )
+
+    criteria = (
+        (
+            "contradiction_count",
+            winner.ranking.contradiction_count,
+            runner.ranking.contradiction_count,
+        ),
+        (
+            "unexplained_strong_count",
+            winner.ranking.unexplained_strong_count,
+            runner.ranking.unexplained_strong_count,
+        ),
+        (
+            "explained_strong_count",
+            winner.ranking.explained_strong_count,
+            runner.ranking.explained_strong_count,
+        ),
+        (
+            "supporting_category_count",
+            winner.ranking.supporting_category_count,
+            runner.ranking.supporting_category_count,
+        ),
+        (
+            "direct_support_count",
+            winner.ranking.direct_support_count,
+            runner.ranking.direct_support_count,
+        ),
+    )
+    difference = next(
+        (criterion for criterion in criteria if criterion[1] != criterion[2]),
+        None,
+    )
+    runner_support = {_evidence_identity(item) for item in runner.supporting_evidence}
+    winner_evidence = {_evidence_identity(item) for item in winner.evidence}
+    unique_support = tuple(
+        item
+        for item in winner.supporting_evidence
+        if _evidence_identity(item) not in runner_support
+    )
+    unique_contradictions = tuple(
+        item
+        for item in runner.contradictions
+        if _evidence_identity(item) not in winner_evidence
+    )
+    if difference is None:
+        summary = (
+            "No causal winner exists because the winner and runner-up have equal "
+            "causal ranking keys; deterministic name ordering is not evidence."
+        )
+        criterion_name = None
+        winner_value = runner_value = None
+    else:
+        criterion_name, winner_value, runner_value = difference
+        summary = (
+            f"{winner.hypothesis.service}/{winner.hypothesis.failure_mode} first "
+            f"separates from {runner.hypothesis.service}/{runner.hypothesis.failure_mode} "
+            f"on {criterion_name}: {winner_value} versus {runner_value}."
+        )
+    return DiagnosisDecisionExplanation(
+        winner.hypothesis,
+        runner.hypothesis,
+        criterion_name,
+        winner_value,
+        runner_value,
+        unique_support,
+        unique_contradictions,
+        summary,
+        winner.hypothesis.service,
+    )
+
+
+def explain_unsupported_decision(
+    localized_service: str,
+    evaluations: Sequence[HypothesisEvaluation],
+) -> DiagnosisDecisionExplanation:
+    rejected = tuple(
+        sorted(
+            evaluation.hypothesis.failure_mode
+            for evaluation in evaluations
+            if evaluation.hypothesis.service == localized_service
+        )
+    )
+    incompatibilities = tuple(
+        evidence
+        for evaluation in evaluations
+        if evaluation.hypothesis.service == localized_service
+        for evidence in evaluation.contradictions
+    )
+    return DiagnosisDecisionExplanation(
+        None,
+        None,
+        "known_mode_compatibility",
+        len(rejected),
+        0,
+        (),
+        incompatibilities,
+        (
+            f"{localized_service} is uniquely localized, but every known failure "
+            "mode is contradicted or incompatible with the observed evidence."
+        ),
+        localized_service,
+        rejected,
+    )
+
+
+def _evidence_identity(evidence: CausalEvidence) -> tuple[object, ...]:
+    return (
+        evidence.category,
+        evidence.service,
+        evidence.failure_mode,
+        evidence.observation,
+        evidence.status,
+    )
 
 
 def _dispersion(summary: MetricSummary, epsilon: float) -> float:

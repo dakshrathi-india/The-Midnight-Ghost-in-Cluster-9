@@ -11,3 +11,22 @@ __all__ = [
     "OpenTelemetryBatch",
     "OpenTelemetryParseError",
 ]
+from .rcaeval import (
+    EXPECTED_LAYOUT,
+    RCAEvalCaseBundle,
+    RCAEvalCaseInput,
+    RCAEvalLayoutError,
+    RCAEvalTruth,
+    discover_case_directories,
+    load_rcaeval_case,
+)
+
+__all__ = [
+    "EXPECTED_LAYOUT",
+    "RCAEvalCaseBundle",
+    "RCAEvalCaseInput",
+    "RCAEvalLayoutError",
+    "RCAEvalTruth",
+    "discover_case_directories",
+    "load_rcaeval_case",
+]

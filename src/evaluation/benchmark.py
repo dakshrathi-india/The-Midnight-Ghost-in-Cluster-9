@@ -12,7 +12,14 @@ from time import perf_counter
 from typing import Callable, Iterable, Sequence
 
 from src.rca import DiagnosisAgent, DiagnosisStatus
-from src.remediation import RecoveryController, RecoveryControllerConfig
+from src.remediation import (
+    ExecutionReceipt,
+    ExecutionStatus,
+    PlanningStatus,
+    RecoveryController,
+    RecoveryControllerConfig,
+    RemediationAction,
+)
 from src.simulation import (
     FaultRequest,
     IncidentGenerator,
@@ -22,7 +29,14 @@ from src.simulation import (
 )
 
 from .ablations import Ablation, build_agent
-from .models import BenchmarkIncidentResult, BenchmarkSummary, summarize_results
+from .models import (
+    BenchmarkIncidentResult,
+    BenchmarkSummary,
+    HealthyControlResult,
+    HealthyControlSummary,
+    summarize_healthy_results,
+    summarize_results,
+)
 from .profiles import RobustnessProfile, fragmentation_for
 
 
@@ -40,6 +54,23 @@ class BudgetCurveRow:
     resolved_rate: float
     incomplete_budget_rate: float
     mean_query_usage: float
+
+
+class _HealthyControlExecutor:
+    """Record an unsafe action attempt without mutating the healthy simulator."""
+
+    def __init__(self) -> None:
+        self.actions: list[RemediationAction] = []
+
+    def execute(self, action: RemediationAction) -> ExecutionReceipt:
+        self.actions.append(action)
+        return ExecutionReceipt(
+            action.target_service,
+            action.action_type,
+            ExecutionStatus.REJECTED,
+            None,
+            "Healthy-control executor rejects all remediation.",
+        )
 
 
 def enumerate_fault_cases(
@@ -175,8 +206,62 @@ class BenchmarkRunner:
                             if run.follow_up_diagnosis
                             else None
                         ),
+                        localized_service=run.diagnosis.localized_service,
+                        action_eligible=run.planning.status is PlanningStatus.PLANNED,
+                        action_blocked_for_evidence=(
+                            run.planning.reason
+                            == "insufficient orthogonal evidence for autonomous remediation"
+                        ),
+                        confirmation_query_count=(
+                            run.diagnosis.confirmation_query_count
+                        ),
                     )
                 )
+        return tuple(results)
+
+    def run_healthy(
+        self, seeds: Sequence[int]
+    ) -> tuple[HealthyControlResult, ...]:
+        if not seeds:
+            raise ValueError("at least one healthy-control seed is required")
+        agent = self._agent_factory()
+        controller = RecoveryController(
+            diagnosis_agent=agent,
+            config=RecoveryControllerConfig(self.verification_steps, 1),
+        )
+        generator = IncidentGenerator(self.config)
+        results: list[HealthyControlResult] = []
+        for seed in seeds:
+            session = generator.start_healthy_session(seed)
+            incident = session.initial_incident
+            analysis_start = max(
+                event.event_timestamp for event in incident.baseline.metric_history
+            ) + timedelta(microseconds=1)
+            api = session.create_query_api(self.total_budget)
+            executor = _HealthyControlExecutor()
+            run = controller.run(
+                api,
+                incident.baseline,
+                analysis_start,
+                incident.observed_end_time,
+                executor,
+                session,
+            )
+            states = session.simulator.current_states.values()
+            preserved = all(
+                state.available and state.error_rate < 0.1 for state in states
+            )
+            results.append(
+                HealthyControlResult(
+                    profile=self.profile,
+                    seed=seed,
+                    diagnosis_status=run.diagnosis.status.value,
+                    diagnosis_query_budget_spent=run.diagnosis.budget_spent,
+                    total_query_budget_spent=api.spent_budget,
+                    action_count=len(executor.actions),
+                    preserved=preserved,
+                )
+            )
         return tuple(results)
 
 
@@ -224,6 +309,8 @@ def write_outputs(
     summaries: Sequence[BenchmarkSummary],
     ablation_summaries: Sequence[BenchmarkSummary] = (),
     curve_rows: Sequence[BudgetCurveRow] = (),
+    healthy_results: Sequence[HealthyControlResult] = (),
+    healthy_summaries: Sequence[HealthyControlSummary] = (),
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_dataclass_csv(
@@ -249,6 +336,20 @@ def write_outputs(
         output_dir / "budget_curve.csv",
         BudgetCurveRow,
         curve_rows,
+    )
+    _write_dataclass_csv(
+        output_dir / "healthy_results.csv",
+        HealthyControlResult,
+        healthy_results,
+    )
+    (output_dir / "healthy_summary.json").write_text(
+        json.dumps(
+            {"summaries": [summary.as_dict() for summary in healthy_summaries]},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
@@ -284,6 +385,20 @@ def _print_summaries(title: str, summaries: Sequence[BenchmarkSummary]) -> None:
         )
 
 
+def _print_healthy_summaries(
+    summaries: Sequence[HealthyControlSummary],
+) -> None:
+    print("\nHealthy controls")
+    print("profile                          n  no candidates  actions  preserved")
+    for summary in summaries:
+        print(
+            f"{summary.profile:<32} {summary.healthy_case_count:>3} "
+            f"{summary.healthy_no_candidate_rate:>13.1%} "
+            f"{summary.healthy_action_rate:>8.1%} "
+            f"{summary.healthy_preserved_rate:>10.1%}"
+        )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seeds", nargs="+", type=int, default=[17])
@@ -305,6 +420,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--budget-curve", nargs="+", type=int)
     parser.add_argument("--verification-steps", type=int, default=150)
+    parser.add_argument("--include-healthy", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/latest"))
     return parser.parse_args()
 
@@ -314,6 +430,8 @@ def main() -> None:
     started = perf_counter()
     all_results: list[BenchmarkIncidentResult] = []
     summaries: list[BenchmarkSummary] = []
+    healthy_results: list[HealthyControlResult] = []
+    healthy_summaries: list[HealthyControlSummary] = []
     cases_by_profile: dict[RobustnessProfile, tuple[FaultCase, ...]] = {}
     for profile in args.profiles:
         config = benchmark_config(fragmentation_for(profile))
@@ -333,6 +451,17 @@ def main() -> None:
                 ablation=Ablation.FULL_SYSTEM.value,
             )
         )
+        if args.include_healthy:
+            controls = BenchmarkRunner(
+                config,
+                total_budget=args.budget,
+                profile=profile.value,
+                verification_steps=args.verification_steps,
+            ).run_healthy(args.seeds)
+            healthy_results.extend(controls)
+            healthy_summaries.append(
+                summarize_healthy_results(controls, profile=profile.value)
+            )
 
     first_profile = args.profiles[0]
     first_config = benchmark_config(fragmentation_for(first_profile))
@@ -371,10 +500,14 @@ def main() -> None:
         summaries,
         ablation_summaries,
         curve_rows,
+        healthy_results,
+        healthy_summaries,
     )
     _print_summaries("Overall diagnosis and recovery", summaries)
     if ablation_summaries:
         _print_summaries("Ablations", ablation_summaries)
+    if healthy_summaries:
+        _print_healthy_summaries(healthy_summaries)
     if curve_rows:
         print("\nBudget curve")
         print("budget  exact  resolved  incomplete  mean usage")

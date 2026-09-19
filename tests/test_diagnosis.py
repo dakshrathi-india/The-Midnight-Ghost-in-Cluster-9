@@ -7,6 +7,7 @@ import pytest
 
 from src.core import (
     BaselineStore,
+    LogEvent,
     MetricEvent,
     QueryCosts,
     SpanEvent,
@@ -34,8 +35,10 @@ from src.rca import (
     TraceLocalizationKind,
     TraceLocalizer,
     dependency_path,
+    explain_ranked_decision,
     rank_evaluations,
 )
+from src.remediation import PlanningStatus, SafeRemediationPlanner, direct_evidence_modalities
 from src.rca.logs import LogEvidence
 from src.simulation import (
     FaultRequest,
@@ -985,6 +988,313 @@ def test_healthy_window_returns_no_candidates() -> None:
 
     assert result.status is DiagnosisStatus.NO_CANDIDATES
     assert result.best_hypothesis is None
+
+
+def _novel_pattern_inputs(*, include_required_metrics: bool):
+    metric_names = ["memory_utilization"]
+    if include_required_metrics:
+        metric_names.extend(("cpu_utilization", "error_rate", "request_latency_ms"))
+    baseline_events = [
+        _metric(index, "worker", name, 10.0 + (index % 3) * 0.1)
+        for name in metric_names
+        for index in range(20)
+    ]
+    incident_events = [
+        _metric(
+            100 + index,
+            "worker",
+            name,
+            80.0 if name == "memory_utilization" else 10.1,
+        )
+        for name in metric_names
+        for index in range(12)
+    ]
+    return BaselineStore.from_metrics({"worker"}, baseline_events), TelemetryStore(
+        incident_events, (), ()
+    )
+
+
+def test_localized_unknown_pattern_returns_unsupported_without_inventing_mode() -> None:
+    baseline, store = _novel_pattern_inputs(include_required_metrics=True)
+
+    result = DiagnosisAgent().diagnose(
+        TelemetryQueryAPI(store, total_budget=17),
+        baseline,
+        START,
+        START + timedelta(seconds=200),
+    )
+
+    assert result.status is DiagnosisStatus.UNSUPPORTED
+    assert result.localized_service == "worker"
+    assert result.best_hypothesis is None
+    assert result.decision_explanation is not None
+    assert set(result.decision_explanation.known_modes_rejected) == MODES
+
+
+def test_missing_required_metrics_do_not_become_unsupported() -> None:
+    baseline, store = _novel_pattern_inputs(include_required_metrics=False)
+
+    result = DiagnosisAgent().diagnose(
+        TelemetryQueryAPI(store, total_budget=17),
+        baseline,
+        START,
+        START + timedelta(seconds=200),
+    )
+
+    assert result.status is not DiagnosisStatus.UNSUPPORTED
+
+
+def test_tied_known_hypotheses_remain_ambiguous() -> None:
+    baseline = _baseline()
+    incident_metrics = [
+        _metric(100 + index, "worker", "request_latency_ms", 100.0, "ms")
+        for index in range(12)
+    ]
+
+    result = DiagnosisAgent().diagnose(
+        TelemetryQueryAPI(TelemetryStore(incident_metrics, (), ()), 17),
+        baseline,
+        START,
+        START + timedelta(seconds=200),
+    )
+
+    assert result.status is DiagnosisStatus.AMBIGUOUS
+    assert result.ranked_hypotheses[0].ranking.core_key() == (
+        result.ranked_hypotheses[1].ranking.core_key()
+    )
+    assert result.decision_explanation is not None
+    assert "No causal winner exists" in result.decision_explanation.summary
+
+
+@pytest.mark.parametrize("supported_mode", sorted(MODES))
+def test_each_supported_mode_remains_compatible_with_matching_required_metric(
+    supported_mode: str,
+) -> None:
+    library = FailureSignatureLibrary()
+    baseline = _baseline()
+    required_name = next(
+        expectation.metric_name
+        for expectation in library.get(supported_mode).metric_expectations
+        if expectation.required
+    )
+    metrics = {
+        "worker": [
+            _metric(
+                100 + index,
+                "worker",
+                required_name,
+                100.0,
+                "ms" if required_name == "request_latency_ms" else "ratio",
+            )
+            for index in range(6)
+        ]
+    }
+    candidates = (_candidate("worker"),)
+    evaluations = HypothesisEvaluator(library).evaluate_all(
+        HypothesisGenerator(library).generate(candidates),
+        candidates,
+        metrics,
+        (),
+        (),
+        set(),
+        baseline,
+    )
+    matching = next(
+        item
+        for item in evaluations
+        if item.hypothesis.failure_mode == supported_mode
+    )
+
+    assert matching.ranking.contradiction_count == 0
+    assert DiagnosisAgent(library)._unsupported_service(evaluations, candidates) is None
+
+
+def _single_modality_case(*, failing_trace: bool):
+    baseline_events = [
+        _metric(index, "worker", "memory_utilization", 10.0 + (index % 3) * 0.1)
+        for index in range(20)
+    ]
+    incident_events = [
+        _metric(100 + index, "worker", "memory_utilization", 80.0)
+        for index in range(12)
+    ]
+    log_time = START + timedelta(seconds=105)
+    logs = (
+        LogEvent(
+            log_time,
+            log_time,
+            "worker",
+            "ERROR",
+            "The service process stopped unexpectedly",
+        ),
+    )
+    spans = (
+        SpanEvent(
+            "trace-1",
+            "span-1",
+            None,
+            "worker",
+            "worker.request",
+            log_time,
+            log_time,
+            10.0,
+            "ERROR",
+        ),
+    ) if failing_trace else ()
+    return (
+        BaselineStore.from_metrics({"worker"}, baseline_events),
+        TelemetryStore(incident_events, logs, spans),
+    )
+
+
+@pytest.mark.parametrize("failing_trace", (False, True))
+def test_action_confirmation_uses_at_most_one_paid_missing_modality_query(
+    failing_trace: bool,
+) -> None:
+    baseline, store = _single_modality_case(failing_trace=failing_trace)
+    end = START + timedelta(seconds=200)
+    api = TelemetryQueryAPI(store, total_budget=17)
+    agent = DiagnosisAgent()
+    diagnosis = agent.diagnose(api, baseline, START, end)
+    initial_spent = api.spent_budget
+    initial_paid = sum(not item.served_from_cache for item in api.query_history)
+
+    assert diagnosis.status is DiagnosisStatus.RESOLVED
+    evaluation = diagnosis.ranked_hypotheses[0]
+    assert direct_evidence_modalities(evaluation) == {
+        EvidenceCategory.LOG_SEMANTIC
+    }
+
+    confirmed = agent.confirm_for_action(api, baseline, START, end, diagnosis)
+    added_paid = sum(not item.served_from_cache for item in api.query_history) - initial_paid
+    outcome = SafeRemediationPlanner().plan(confirmed, baseline)
+
+    assert confirmed.confirmation_query_count == 1
+    assert added_paid == 1
+    assert api.spent_budget > initial_spent
+    if failing_trace:
+        assert outcome.status is PlanningStatus.PLANNED
+        assert direct_evidence_modalities(confirmed.ranked_hypotheses[0]) == {
+            EvidenceCategory.LOG_SEMANTIC,
+            EvidenceCategory.TRACE_LOCALIZATION,
+        }
+    else:
+        assert confirmed.status is DiagnosisStatus.RESOLVED
+        assert outcome.status is PlanningStatus.BLOCKED
+        assert outcome.reason == (
+            "insufficient orthogonal evidence for autonomous remediation"
+        )
+
+
+def test_action_confirmation_is_blocked_when_budget_cannot_afford_query() -> None:
+    baseline, store = _single_modality_case(failing_trace=True)
+    end = START + timedelta(seconds=200)
+    api = TelemetryQueryAPI(store, total_budget=2)
+    agent = DiagnosisAgent()
+    diagnosis = agent.diagnose(api, baseline, START, end)
+
+    confirmed = agent.confirm_for_action(api, baseline, START, end, diagnosis)
+    outcome = SafeRemediationPlanner().plan(confirmed, baseline)
+
+    assert confirmed == diagnosis
+    assert outcome.status is PlanningStatus.BLOCKED
+    assert outcome.reason == (
+        "insufficient orthogonal evidence for autonomous remediation"
+    )
+
+
+def _explanation_evaluation(
+    name: str,
+    ranking: RankingComponents,
+    categories: tuple[EvidenceCategory, ...] = (),
+) -> HypothesisEvaluation:
+    evidence = tuple(
+        CausalEvidence(
+            category,
+            name,
+            "network_latency",
+            category.value,
+            EvidenceStatus.SUPPORT,
+            "deterministic test evidence",
+        )
+        for category in categories
+    )
+    return HypothesisEvaluation(
+        Hypothesis(name, "network_latency", CandidateStrength.STRONG),
+        evidence,
+        tuple(f"explained-{index}" for index in range(ranking.explained_strong_count)),
+        tuple(
+            f"unexplained-{index}"
+            for index in range(ranking.unexplained_strong_count)
+        ),
+        ranking,
+    )
+
+
+@pytest.mark.parametrize(
+    ("winner_ranking", "runner_ranking", "criterion"),
+    (
+        (
+            RankingComponents(0, 2, 1, 1, 1),
+            RankingComponents(1, 0, 5, 5, 5),
+            "contradiction_count",
+        ),
+        (
+            RankingComponents(0, 0, 1, 1, 1),
+            RankingComponents(0, 1, 5, 5, 5),
+            "unexplained_strong_count",
+        ),
+        (
+            RankingComponents(0, 0, 3, 1, 1),
+            RankingComponents(0, 0, 2, 5, 5),
+            "explained_strong_count",
+        ),
+        (
+            RankingComponents(0, 0, 2, 3, 1),
+            RankingComponents(0, 0, 2, 2, 5),
+            "supporting_category_count",
+        ),
+        (
+            RankingComponents(0, 0, 2, 3, 2),
+            RankingComponents(0, 0, 2, 3, 1),
+            "direct_support_count",
+        ),
+    ),
+)
+def test_decision_explanation_uses_first_frozen_causal_difference(
+    winner_ranking: RankingComponents,
+    runner_ranking: RankingComponents,
+    criterion: str,
+) -> None:
+    winner = _explanation_evaluation("winner", winner_ranking)
+    runner = _explanation_evaluation("runner", runner_ranking)
+    ranked = rank_evaluations((runner, winner))
+
+    first = explain_ranked_decision(ranked)
+    second = explain_ranked_decision(ranked)
+
+    assert first == second
+    assert first is not None
+    assert first.winner == winner.hypothesis
+    assert first.runner_up == runner.hypothesis
+    assert first.first_differing_criterion == criterion
+
+
+def test_equal_core_explanation_states_that_no_causal_winner_exists() -> None:
+    left = _explanation_evaluation(
+        "alpha", RankingComponents(0, 0, 1, 1, 1)
+    )
+    right = _explanation_evaluation(
+        "beta", RankingComponents(0, 0, 1, 1, 1)
+    )
+    ranked = rank_evaluations((right, left))
+
+    explanation = explain_ranked_decision(ranked)
+
+    assert not DiagnosisAgent._is_resolved(ranked)
+    assert explanation is not None
+    assert explanation.first_differing_criterion is None
+    assert "No causal winner exists" in explanation.summary
 
 
 def test_database_slowdown_with_decoy_resolves_correct_pair_deterministically() -> None:

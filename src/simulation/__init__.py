@@ -7,13 +7,20 @@ from .config import (
     SimulationConfig,
     benchmark_config,
 )
-from .generator import GroundTruth, Incident, IncidentGenerator, SimulationIncidentSession
+from .generator import (
+    GroundTruth,
+    HealthyGroundTruth,
+    Incident,
+    IncidentGenerator,
+    SimulationIncidentSession,
+)
 from .remediation import SimulatorRemediationExecutor
 
 __all__ = [
     "FaultRequest",
     "FragmentationConfig",
     "GroundTruth",
+    "HealthyGroundTruth",
     "Incident",
     "IncidentGenerator",
     "ServiceConfig",

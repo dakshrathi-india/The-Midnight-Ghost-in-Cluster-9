@@ -8,7 +8,11 @@ from typing import Mapping
 from src.core.baseline import BaselineStore
 from src.rca.agent import DiagnosisResult, DiagnosisStatus
 from src.rca.candidates import CandidateStrength
-from src.rca.diagnosis import EvidenceCategory, EvidenceStatus
+from src.rca.diagnosis import (
+    EvidenceCategory,
+    EvidenceStatus,
+    HypothesisEvaluation,
+)
 
 from .domain import (
     PlanningOutcome,
@@ -37,6 +41,28 @@ _REVERSIBLE_ACTIONS = frozenset(
         RemediationActionType.REROUTE,
     }
 )
+
+DIRECT_ACTION_MODALITIES = frozenset(
+    {
+        EvidenceCategory.METRIC_PATTERN,
+        EvidenceCategory.LOG_SEMANTIC,
+        EvidenceCategory.TRACE_LOCALIZATION,
+    }
+)
+
+
+def direct_evidence_modalities(
+    evaluation: HypothesisEvaluation,
+) -> frozenset[EvidenceCategory]:
+    hypothesis = evaluation.hypothesis
+    return frozenset(
+        evidence.category
+        for evidence in evaluation.evidence
+        if evidence.service == hypothesis.service
+        and evidence.failure_mode == hypothesis.failure_mode
+        and evidence.status is EvidenceStatus.SUPPORT
+        and evidence.category in DIRECT_ACTION_MODALITIES
+    )
 
 
 class SafeRemediationPlanner:
@@ -85,20 +111,10 @@ class SafeRemediationPlanner:
         if evaluation.ranking.contradiction_count != 0 or evaluation.contradictions:
             return self._blocked("best hypothesis contains contradictory evidence")
 
-        directly_confirmed = any(
-            evidence.service == hypothesis.service
-            and evidence.failure_mode == hypothesis.failure_mode
-            and evidence.status is EvidenceStatus.SUPPORT
-            and evidence.category
-            in {
-                EvidenceCategory.LOG_SEMANTIC,
-                EvidenceCategory.TRACE_LOCALIZATION,
-            }
-            for evidence in evaluation.evidence
-        )
-        if not directly_confirmed:
+        modalities = direct_evidence_modalities(evaluation)
+        if len(modalities) < 2:
             return self._blocked(
-                "best hypothesis lacks direct root log or trace confirmation"
+                "insufficient orthogonal evidence for autonomous remediation"
             )
 
         action_type = FAILURE_MODE_ACTIONS.get(hypothesis.failure_mode)
@@ -113,7 +129,7 @@ class SafeRemediationPlanner:
             action_type=action_type,
             reason=(
                 f"Resolved {hypothesis.failure_mode} on {hypothesis.service} has "
-                "zero contradictions and direct confirming root evidence."
+                "zero contradictions and at least two direct evidence modalities."
             ),
             blast_radius_services=frozenset({hypothesis.service}),
             reversible=action_type in _REVERSIBLE_ACTIONS,

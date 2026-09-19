@@ -24,6 +24,8 @@ from src.remediation import (
     ExecutionReceipt,
     ExecutionStatus,
     FreshObservationWindow,
+    IncidentPhase,
+    IncidentTransition,
     PlanningStatus,
     RecoveryController,
     RecoveryControllerConfig,
@@ -32,6 +34,7 @@ from src.remediation import (
     RemediationAction,
     RemediationActionType,
     SafeRemediationPlanner,
+    validate_incident_transitions,
 )
 from src.simulation import (
     FaultRequest,
@@ -104,6 +107,14 @@ def _diagnosis(
     hypothesis = Hypothesis("root", "database_slowdown", CandidateStrength.STRONG)
     evidence = (
         CausalEvidence(
+            EvidenceCategory.METRIC_PATTERN,
+            "root",
+            "database_slowdown",
+            "required latency is high",
+            EvidenceStatus.SUPPORT,
+            "The required metric pattern is present at the root.",
+        ),
+        CausalEvidence(
             EvidenceCategory.TRACE_LOCALIZATION,
             "root",
             "database_slowdown",
@@ -117,7 +128,7 @@ def _diagnosis(
         evidence,
         explained,
         (),
-        RankingComponents(0, 0, len(explained), 1, 1),
+        RankingComponents(0, 0, len(explained), 2, 2),
     )
     candidates = tuple(
         ServiceCandidate(
@@ -306,6 +317,14 @@ def test_correct_interventions_verify_from_fresh_session_telemetry(
     )
     assert api.spent_budget <= maximum_budget
     assert result.verification.budget_spent == len(result.verification.checked_services)
+    assert tuple(item.to_phase for item in result.state_history) == (
+        IncidentPhase.DETECTED,
+        IncidentPhase.CANDIDATE,
+        IncidentPhase.RESOLVED,
+        IncidentPhase.ACTION_ELIGIBLE,
+        IncidentPhase.APPLIED,
+        IncidentPhase.VERIFIED,
+    )
 
 
 def test_wrong_applied_intervention_fails_adds_exact_contradiction_and_reinvestigates() -> None:
@@ -413,6 +432,40 @@ def test_blocked_plan_runs_neither_execution_nor_verification() -> None:
     assert result.execution is None
     assert result.verification is None
     assert result.intervention_feedback == {}
+    assert result.state_history[-1].to_phase is IncidentPhase.ACTION_BLOCKED
+
+
+@pytest.mark.parametrize(
+    "history",
+    (
+        (
+            IncidentTransition(None, IncidentPhase.DETECTED, "start"),
+            IncidentTransition(
+                IncidentPhase.DETECTED, IncidentPhase.NO_CANDIDATES, "healthy"
+            ),
+            IncidentTransition(
+                IncidentPhase.NO_CANDIDATES, IncidentPhase.APPLIED, "impossible"
+            ),
+        ),
+        (
+            IncidentTransition(None, IncidentPhase.DETECTED, "start"),
+            IncidentTransition(
+                IncidentPhase.DETECTED, IncidentPhase.CANDIDATE, "candidate"
+            ),
+            IncidentTransition(
+                IncidentPhase.CANDIDATE, IncidentPhase.UNSUPPORTED, "unknown"
+            ),
+            IncidentTransition(
+                IncidentPhase.UNSUPPORTED, IncidentPhase.APPLIED, "impossible"
+            ),
+        ),
+    ),
+)
+def test_impossible_incident_state_transitions_are_rejected(
+    history: tuple[IncidentTransition, ...],
+) -> None:
+    with pytest.raises(ValueError, match="illegal incident transition"):
+        validate_incident_transitions(history)
 
 
 def test_inconclusive_verification_adds_no_feedback_or_second_execution() -> None:
