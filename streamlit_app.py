@@ -116,10 +116,10 @@ def main() -> None:
     base_config = benchmark_config()
     options = service_failure_mode_options(base_config)
     existing = cast(DemoExecution | None, st.session_state.get("demo_execution"))
-    section = _page_header(existing)
     seed, service, failure_mode, profile, budget, run_pressed = _setup_toolbar(
         options, existing
     )
+    section = _workspace_nav(existing)
 
     if run_pressed:
         if failure_mode not in options[service]:
@@ -152,6 +152,27 @@ def _setup_toolbar(
     options: dict[str, tuple[str, ...]],
     execution: DemoExecution | None,
 ) -> tuple[int, str, str, RobustnessProfile, int, bool]:
+    with st.container(height=96, border=False):
+        st.empty()
+
+    st.markdown(
+        """
+        <div style="margin-bottom: 1rem;">
+            <span style="
+                font-size: 1.45rem;
+                font-weight: 650;
+                line-height: 1.15;
+            ">Cluster 9</span>
+            <span style="
+                margin-left: 0.75rem;
+                font-size: 0.86rem;
+                color: #74716B;
+            ">Incident Investigator</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if execution is not None and not st.session_state["editing_setup"]:
         summary_column, edit_column = st.columns(
             (10, 1), gap="small", vertical_alignment="center"
@@ -236,7 +257,7 @@ def _compact_shell() -> None:
         div[data-testid="stMainBlockContainer"] {
             width: calc(100% - 48px) !important;
             max-width: 1320px !important;
-            padding-top: 2.5rem !important;
+            padding-top: 0.5rem !important;
             padding-bottom: 2.5rem !important;
         }
         </style>
@@ -244,46 +265,30 @@ def _compact_shell() -> None:
     )
 
 
-def _page_header(execution: DemoExecution | None) -> str:
-    title_column, status_column = st.columns(
+def _workspace_nav(execution: DemoExecution | None) -> str:
+    if execution is None:
+        return "Overview"
+
+    navigation, status = st.columns(
         (8, 2), gap="medium", vertical_alignment="center"
     )
-    with title_column:
-        st.markdown(
-            """
-            <div style="margin: 1.75rem 0 0.35rem 0;">
-                <span style="
-                    font-size: 1.45rem;
-                    font-weight: 650;
-                    line-height: 1.15;
-                ">Cluster 9</span>
-                <span style="
-                    margin-left: 0.75rem;
-                    font-size: 0.86rem;
-                    color: #74716B;
-                ">Incident Investigator</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
+    with navigation:
+        selected = st.radio(
+            "Workspace section",
+            ("Overview", "Investigation", "Evaluation"),
+            horizontal=True,
+            index=0,
+            key="workspace-section-radio",
+            label_visibility="collapsed",
         )
-    with status_column:
-        if execution is not None:
-            recovery = execution.run.verification
-            recovery_status = recovery.status.value if recovery else "NOT VERIFIED"
-            st.markdown(
-                f"**{execution.run.diagnosis.status.value}** · "
-                f"**{recovery_status}**",
-                text_alignment="right",
-            )
-
-    selected = st.radio(
-        "Workspace section",
-        ("Overview", "Investigation", "Evaluation"),
-        horizontal=True,
-        index=0,
-        key="workspace-section-radio",
-        label_visibility="collapsed",
-    )
+    with status:
+        recovery = execution.run.verification
+        recovery_status = recovery.status.value if recovery else "NOT VERIFIED"
+        st.markdown(
+            f"**{execution.run.diagnosis.status.value}** · "
+            f"**{recovery_status}**",
+            text_alignment="right",
+        )
     st.divider()
     return str(selected)
 
