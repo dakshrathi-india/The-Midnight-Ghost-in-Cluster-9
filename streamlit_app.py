@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Sequence, cast
@@ -755,14 +756,30 @@ def _evaluation(execution: DemoExecution) -> None:
     st.caption("Synthetic evaluation — not a production accuracy claim.")
     directories = discover_benchmark_artifacts(Path("outputs"))
     artifacts = tuple(_load_cached_artifact(directory) for directory in directories)
-    if not artifacts:
-        st.caption("No generated benchmark artifacts are available.")
-        _ground_truth(execution)
-        return
 
-    robustness = _best_robustness_artifact(artifacts)
-    ablations = max(artifacts, key=lambda item: len(item.ablations))
-    curve = max(artifacts, key=lambda item: len(item.budget_curve))
+    if artifacts:
+        robustness = _best_robustness_artifact(artifacts)
+        ablations = max(artifacts, key=lambda item: len(item.ablations))
+        curve = max(artifacts, key=lambda item: len(item.budget_curve))
+    else:
+        snapshot_path = Path("docs/final_benchmark_snapshot.json")
+        if not snapshot_path.is_file():
+            st.caption("No benchmark artifacts are available.")
+            _ground_truth(execution)
+            return
+        with snapshot_path.open(encoding="utf-8") as stream:
+            snapshot = json.load(stream)
+        robustness = BenchmarkArtifacts(
+            directory=snapshot_path.parent,
+            summaries=tuple(snapshot.get("summaries", ())),
+            incidents=(),
+            ablations=tuple(snapshot.get("ablations", ())),
+            budget_curve=tuple(snapshot.get("budget_curve", ())),
+            missing_files=(),
+        )
+        ablations = robustness
+        curve = robustness
+        st.caption("Showing the checked-in final validation snapshot.")
 
     robustness_rows = tuple(
         {
