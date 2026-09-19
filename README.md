@@ -31,7 +31,7 @@ flowchart LR
     G --> I
     H --> I
 
-    I --> J[(service, failure_mode) hypotheses]
+    I --> J["(service, failure_mode) hypotheses"]
     J --> K[Causal evidence + contradiction-first ranking]
     K --> L[Active query planner]
     L --> C
