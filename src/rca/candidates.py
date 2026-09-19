@@ -35,9 +35,9 @@ class CandidateGenerator:
     def generate(
         self,
         services: Sequence[str] | frozenset[str] | set[str],
-        mad_results: Mapping[str, MADServiceEvidence],
-        change_results: Mapping[str, CUSUMServiceEvidence],
-        isolation_results: Mapping[str, IsolationForestEvidence],
+        mad_results: Mapping[str, MADServiceEvidence | None],
+        change_results: Mapping[str, CUSUMServiceEvidence | None],
+        isolation_results: Mapping[str, IsolationForestEvidence | None],
         trace_evidence: Mapping[str, TraceServiceEvidence],
         log_evidence: Sequence[LogEvidence],
     ) -> tuple[ServiceCandidate, ...]:

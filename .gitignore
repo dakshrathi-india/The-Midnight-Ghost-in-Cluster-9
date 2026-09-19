@@ -17,10 +17,10 @@ __pycache__/
 # Generated incident data from our simulator
 generated/
 
-# Future experiment / evaluation outputs
+# Generated benchmark / evaluation outputs
 outputs/
 
-# Future saved model/cache files if we add embeddings later
+# Local model/cache files
 models/
 
 # OS junk

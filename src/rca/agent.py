@@ -5,14 +5,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from src.core.baseline import BaselineStore
 from src.core.budget import QueryHistoryEntry
 from src.core.models import LogEvent, MetricEvent, SpanEvent
 from src.core.telemetry import TelemetryQueryAPI
 
-from .anomaly import CUSUMDetector, IsolationForestDetector, MADDetector
+from .anomaly import (
+    CUSUMDetector,
+    CUSUMServiceEvidence,
+    IsolationForestDetector,
+    IsolationForestEvidence,
+    MADDetector,
+    MADServiceEvidence,
+)
 from .candidates import CandidateGenerator, CandidateStrength, ServiceCandidate
 from .diagnosis import (
     DiagnosisConfig,
@@ -25,7 +32,7 @@ from .diagnosis import (
     rank_evaluations,
 )
 from .graph import TraceGraphAnalyzer
-from .logs import LogEvidenceExtractor
+from .logs import LogEvidence, LogEvidenceExtractor
 from .planner import ActiveQueryPlanner, PlannedQuery
 from .signatures import FailureSignatureLibrary
 
@@ -62,25 +69,49 @@ class DiagnosisAgentConfig:
     )
 
 
+class LogEvidenceProvider(Protocol):
+    def extract(self, logs: Sequence[LogEvent]) -> tuple[LogEvidence, ...]: ...
+
+
+MADAnalyzer = Callable[
+    [str, Sequence[MetricEvent], BaselineStore], MADServiceEvidence | None
+]
+CUSUMAnalyzer = Callable[
+    [str, Sequence[MetricEvent], BaselineStore], CUSUMServiceEvidence | None
+]
+IsolationAnalyzer = Callable[
+    [str, Sequence[MetricEvent], BaselineStore], IsolationForestEvidence | None
+]
+
+
 class DiagnosisAgent:
     def __init__(
         self,
         signatures: FailureSignatureLibrary | None = None,
         diagnosis_config: DiagnosisConfig | None = None,
         agent_config: DiagnosisAgentConfig | None = None,
-        log_extractor: LogEvidenceExtractor | None = None,
+        log_extractor: LogEvidenceProvider | None = None,
+        mad_analyzer: MADAnalyzer | None = None,
+        cusum_analyzer: CUSUMAnalyzer | None = None,
+        isolation_analyzer: IsolationAnalyzer | None = None,
+        trace_analyzer: TraceGraphAnalyzer | None = None,
+        hypothesis_evaluator: HypothesisEvaluator | None = None,
     ) -> None:
         self.signatures = signatures or FailureSignatureLibrary()
         self.diagnosis_config = diagnosis_config or DiagnosisConfig()
         self.agent_config = agent_config or DiagnosisAgentConfig()
-        self._mad = MADDetector()
-        self._cusum = CUSUMDetector()
-        self._isolation = IsolationForestDetector()
+        self._mad_analyze = mad_analyzer or MADDetector().analyze
+        self._cusum_analyze = cusum_analyzer or CUSUMDetector().analyze
+        self._isolation_analyze = (
+            isolation_analyzer or IsolationForestDetector().analyze
+        )
         self._candidate_generator = CandidateGenerator()
         self._hypothesis_generator = HypothesisGenerator(self.signatures)
-        self._evaluator = HypothesisEvaluator(self.signatures, self.diagnosis_config)
+        self._evaluator = hypothesis_evaluator or HypothesisEvaluator(
+            self.signatures, self.diagnosis_config
+        )
         self._planner = ActiveQueryPlanner(self.signatures)
-        self._trace_analyzer = TraceGraphAnalyzer()
+        self._trace_analyzer = trace_analyzer or TraceGraphAnalyzer()
         self._log_extractor = log_extractor or LogEvidenceExtractor()
 
     def diagnose(
@@ -254,15 +285,15 @@ class DiagnosisAgent:
         intervention_contradictions: Mapping[tuple[str, str], str] | None = None,
     ) -> tuple[tuple[ServiceCandidate, ...], tuple[HypothesisEvaluation, ...]]:
         mad = {
-            service: self._mad.analyze(service, metrics_by_service[service], baseline)
+            service: self._mad_analyze(service, metrics_by_service[service], baseline)
             for service in services
         }
         change = {
-            service: self._cusum.analyze(service, metrics_by_service[service], baseline)
+            service: self._cusum_analyze(service, metrics_by_service[service], baseline)
             for service in services
         }
         isolation = {
-            service: self._isolation.analyze(
+            service: self._isolation_analyze(
                 service, metrics_by_service[service], baseline
             )
             for service in services
