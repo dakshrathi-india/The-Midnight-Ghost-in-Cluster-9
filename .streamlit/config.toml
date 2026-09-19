@@ -1,0 +1,39 @@
+[server]
+fileWatcherType = "none"
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#5754C8"
+backgroundColor = "#F6F5F1"
+secondaryBackgroundColor = "#FCFBF8"
+codeBackgroundColor = "#EFEEE9"
+textColor = "#171717"
+linkColor = "#4B48B6"
+borderColor = "#DEDCD6"
+codeTextColor = "#3D3B38"
+showWidgetBorder = true
+showSidebarBorder = false
+baseRadius = "8px"
+buttonRadius = "8px"
+font = "sans-serif"
+headingFont = "sans-serif"
+codeFont = "monospace"
+baseFontSize = 15
+baseFontWeight = 400
+codeFontSize = "13px"
+headingFontSizes = ["36px", "28px", "20px", "17px", "14px", "12px"]
+headingFontWeights = [600, 600, 600, 600, 500, 500]
+linkUnderline = false
+blueColor = "#5754C8"
+violetColor = "#5754C8"
+greenColor = "#4F7A5A"
+yellowColor = "#B17A32"
+orangeColor = "#A96F32"
+redColor = "#A65353"
+grayColor = "#74716B"
+chartCategoricalColors = ["#5754C8", "#4F7A5A", "#B17A32", "#8E8B84"]
+dataframeBorderColor = "#DEDCD6"
+dataframeHeaderBackgroundColor = "#EFEEE9"

@@ -42,6 +42,23 @@ python -m pytest -q
 
 The demo is fixed to seed 17 with `postgres/database_slowdown`; it should resolve, apply `FAILOVER`, verify recovery, and stay within 17 query-cost units.
 
+## Interactive demo
+
+Install the project dependencies and start the dashboard:
+
+```bash
+python -m pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+The Streamlit demo runs the real incident, diagnosis, safety-planning, remediation,
+fresh-observation, and recovery-verification pipeline under one visible query
+budget. Its investigation workspace keeps the causal propagation map, diagnosis,
+phase-aware telemetry, autonomous response, and budget together in the primary
+view. Separate Investigation and Evaluation views retain the technical evidence
+and saved benchmark artifacts. Fault-injection controls and hidden ground truth
+remain explicitly isolated as evaluation-only inputs and outputs.
+
 ## Benchmarks
 
 Quick deterministic run:
