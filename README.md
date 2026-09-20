@@ -6,7 +6,7 @@ The system consumes metrics, logs, and traces, identifies anomalous candidate se
 
 Synthetic incidents are used only for controlled evaluation. Hidden ground truth is never passed to RCA, remediation, or recovery verification.
 
-**Live demo:** https://cluster9-incident-rca.streamlit.app/  
+**Live demo:** https://cluster9-rca-final.streamlit.app/  
 **Technical report:** [Midnight_Ghost_Technical_Report_Final.pdf](Midnight_Ghost_Technical_Report_Final.pdf)  
 **Detailed whitepaper:** [docs/whitepaper.md](docs/whitepaper.md)
 
